@@ -59,7 +59,8 @@ void gc_collect_end(void);
 void gc_sweep_all(void);
 
 enum {
-    GC_ALLOC_FLAG_HAS_FINALISER = 1,
+  GC_ALLOC_FLAG_HAS_FINALISER = 1,
+  GC_ALLOC_FLAG_IS_DATA = 2,
 };
 
 void *gc_alloc(size_t n_bytes, unsigned int alloc_flags);
@@ -83,5 +84,4 @@ typedef struct _gc_info_t {
 void gc_info(gc_info_t *info);
 void gc_dump_info(const mp_print_t *print);
 void gc_dump_alloc_table(const mp_print_t *print);
-
 #endif // MICROPY_INCLUDED_PY_GC_H

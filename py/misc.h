@@ -98,6 +98,10 @@ typedef unsigned int uint;
 
 // TODO make a lazy m_renew that can increase by a smaller amount than requested (but by at least 1 more element)
 
+#define m_new_data(type, num) ((type *)(m_malloc_data(sizeof(type) * (num))))
+#define m_new_obj_data(type) (m_new_data(type, 1))
+void *m_malloc_data(size_t num_bytes);
+
 #define m_new(type, num) ((type *)(m_malloc(sizeof(type) * (num))))
 #define m_new_maybe(type, num) ((type *)(m_malloc_maybe(sizeof(type) * (num))))
 #define m_new0(type, num) ((type *)(m_malloc0(sizeof(type) * (num))))

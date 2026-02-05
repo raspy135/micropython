@@ -82,6 +82,21 @@ static void *realloc_ext(void *ptr, size_t n_bytes, bool allow_move) {
 
 #endif // MICROPY_ENABLE_GC
 
+void *m_malloc_data(size_t num_bytes) {
+  void *ptr = gc_alloc(num_bytes,GC_ALLOC_FLAG_IS_DATA);
+  if (ptr == NULL && num_bytes != 0) {
+    m_malloc_fail(num_bytes);
+  }
+#if MICROPY_MEM_STATS
+  MP_STATE_MEM(total_bytes_allocated) += num_bytes;
+  MP_STATE_MEM(current_bytes_allocated) += num_bytes;
+  UPDATE_PEAK();
+#endif
+  DEBUG_printf("malloc %d : %p\n", num_bytes, ptr);
+  return ptr;
+}
+
+
 void *m_malloc(size_t num_bytes) {
     void *ptr = malloc(num_bytes);
     if (ptr == NULL && num_bytes != 0) {
