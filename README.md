@@ -1,5 +1,20 @@
 [![Unix CI badge](https://github.com/micropython/micropython/actions/workflows/ports_unix.yml/badge.svg)](https://github.com/micropython/micropython/actions?query=branch%3Amaster+event%3Apush) [![STM32 CI badge](https://github.com/micropython/micropython/actions/workflows/ports_stm32.yml/badge.svg)](https://github.com/micropython/micropython/actions?query=branch%3Amaster+event%3Apush) [![Docs CI badge](https://github.com/micropython/micropython/actions/workflows/docs.yml/badge.svg)](https://docs.micropython.org/) [![codecov](https://codecov.io/gh/micropython/micropython/branch/master/graph/badge.svg?token=I92PfD05sD)](https://codecov.io/gh/micropython/micropython)
 
+Incremental garbage collection mod
+=======================
+
+## Benefits
+
+- ATB is expanded to 4-bit.
+- DATA marked allocation skips data scan on data allocation(such as bytearray).
+- Incremental GC for scan and sweep, eliminating stop-the-world GC.
+
+## Notes
+
+- Intented to use with ESP32 with PSRAM. Porting to other similar performance MCU should not be hard.
+- Write barrier(GC_WB) is needed to track new allocations in middle of garbage collection. ESP32 and Unix has the modification.
+
+
 The MicroPython project
 =======================
 <p align="center">
