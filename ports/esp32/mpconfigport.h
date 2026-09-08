@@ -89,6 +89,48 @@
 #define MICROPY_GC_SPLIT_HEAP               (1)
 #define MICROPY_GC_SPLIT_HEAP_AUTO          (1)
 
+// Tri-colour incremental GC: marking runs in bounded slices driven by
+// gc_alloc(), so the interpreter is never stalled for a whole mark pass.
+// Disable at compile time (=0) to get the classic single-pass collector
+// back byte-for-byte; at runtime via gc.incremental(False).
+#ifndef MICROPY_GC_INCREMENTAL
+#define MICROPY_GC_INCREMENTAL              (1)
+#endif
+
+// GC mark stack (shared by the classic marker and the incremental drain).
+// Both push every unmarked child of a block before popping the next one, so
+// the depth needed tracks the *breadth* of the object graph, not its depth.
+// On overflow the collector falls back to re-walking the whole allocation
+// table, which on a multi-MB PSRAM heap costs far more than this array.
+// Size it from gc.stats()["max_gray"]; a reading equal to this value means
+// it is clipping and the real requirement is higher.
+// Cost is 8 bytes/entry (size_t block + area pointer): 2048 -> 16 KB.  With
+// MICROPY_GC_STACK_EXTERNAL below that 16 KB comes from PSRAM, not internal RAM.
+#ifndef MICROPY_ALLOC_GC_STACK_SIZE
+#define MICROPY_ALLOC_GC_STACK_SIZE         (2048)  // 16 KB
+#endif
+
+// Allocate the GC mark stack from PSRAM (see main.c) instead of placing it in
+// internal RAM as part of mp_state_mem's BSS.  Marking is already dominated by
+// walking a PSRAM heap, and the stack is touched LIFO so it stays cache-hot.
+// Set to 0 to put it back in internal RAM for an A/B comparison.  main.c falls
+// back to internal RAM automatically on a board without PSRAM.
+#ifndef MICROPY_GC_STACK_EXTERNAL
+#define MICROPY_GC_STACK_EXTERNAL           (1)
+#endif
+
+// Root scan of thread stacks, implemented in gccollect.c, called by the
+// incremental collector at cycle start and (atomically) at cycle end.
+void mp_port_gc_stack_roots(void);
+#define MICROPY_GC_PORT_STACK_ROOTS()       mp_port_gc_stack_roots()
+
+// Microsecond time source for gc.stats() (esp_timer, no header needed here).
+#if MICROPY_GC_INCREMENTAL
+int64_t esp_timer_get_time(void);
+#define MICROPY_GC_USTIME_AVAILABLE         (1)
+#define MICROPY_GC_PORT_USTIME()            esp_timer_get_time()
+#endif
+
 // extended modules
 #ifndef MICROPY_PY_ESPNOW
 #define MICROPY_PY_ESPNOW                   (1)

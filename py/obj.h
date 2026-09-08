@@ -32,6 +32,7 @@
 #include "py/misc.h"
 #include "py/qstr.h"
 #include "py/mpprint.h"
+#include "py/gc.h"
 #include "py/runtime0.h"
 
 // This is the definition of the opaque MicroPython object type.
@@ -504,6 +505,7 @@ void mp_map_init(mp_map_t *map, size_t n);
 void mp_map_init_fixed_table(mp_map_t *map, size_t n, const mp_obj_t *table);
 void mp_map_deinit(mp_map_t *map);
 mp_map_elem_t *mp_map_lookup(mp_map_t *map, mp_obj_t index, mp_map_lookup_kind_t lookup_kind);
+void mp_map_set_value(mp_map_elem_t *elem, mp_obj_t value);
 void mp_map_clear(mp_map_t *map);
 void mp_map_dump(mp_map_t *map);
 
@@ -1110,6 +1112,7 @@ static inline mp_obj_t mp_obj_cell_get(mp_obj_t self_in) {
 
 static inline void mp_obj_cell_set(mp_obj_t self_in, mp_obj_t obj) {
     mp_obj_cell_t *self = (mp_obj_cell_t *)MP_OBJ_TO_PTR(self_in);
+    GC_BARRIER(obj); // closure cell is a heap container (STORE_DEREF)
     self->obj = obj;
 }
 
@@ -1283,8 +1286,13 @@ void mp_seq_multiply(const void *items, size_t item_sz, size_t len, size_t times
 #if MICROPY_PY_BUILTINS_SLICE
 bool mp_seq_get_fast_slice_indexes(mp_uint_t len, mp_obj_t slice, mp_bound_slice_t *indexes);
 #endif
-#define mp_seq_copy(dest, src, len, item_t) memcpy(dest, src, len * sizeof(item_t))
-#define mp_seq_cat(dest, src1, len1, src2, len2, item_t) { memcpy(dest, src1, (len1) * sizeof(item_t)); memcpy(dest + (len1), src2, (len2) * sizeof(item_t)); }
+#define mp_seq_copy(dest, src, len, item_t) \
+    do { GC_WB_N((src), sizeof(item_t) == sizeof(mp_obj_t) ? (len) : 0); \
+         memcpy(dest, src, (len) * sizeof(item_t)); } while (0)
+#define mp_seq_cat(dest, src1, len1, src2, len2, item_t) { \
+    GC_WB_N((src1), sizeof(item_t) == sizeof(mp_obj_t) ? (len1) : 0); \
+    GC_WB_N((src2), sizeof(item_t) == sizeof(mp_obj_t) ? (len2) : 0); \
+    memcpy(dest, src1, (len1) * sizeof(item_t)); memcpy(dest + (len1), src2, (len2) * sizeof(item_t)); }
 bool mp_seq_cmp_bytes(mp_uint_t op, const byte *data1, size_t len1, const byte *data2, size_t len2);
 bool mp_seq_cmp_objs(mp_uint_t op, const mp_obj_t *items1, size_t len1, const mp_obj_t *items2, size_t len2);
 mp_obj_t mp_seq_index_obj(const mp_obj_t *items, size_t len, size_t n_args, const mp_obj_t *args);

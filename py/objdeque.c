@@ -108,6 +108,7 @@ static mp_obj_t mp_obj_deque_append(mp_obj_t self_in, mp_obj_t arg) {
         mp_raise_msg(&mp_type_IndexError, MP_ERROR_TEXT("full"));
     }
 
+    GC_WB(arg); // deque items buffer is a heap container
     self->items[self->i_put] = arg;
     self->i_put = new_i_put;
 
@@ -134,6 +135,7 @@ static mp_obj_t mp_obj_deque_appendleft(mp_obj_t self_in, mp_obj_t arg) {
     }
 
     self->i_get = new_i_get;
+    GC_WB(arg); // deque items buffer is a heap container
     self->items[self->i_get] = arg;
 
     // overwriting first element in deque
@@ -217,6 +219,7 @@ static mp_obj_t deque_subscr(mp_obj_t self_in, mp_obj_t index, mp_obj_t value) {
         return self->items[index_val];
     } else {
         // store into deque
+        GC_WB(value); // deque items buffer is a heap container
         self->items[index_val] = value;
         return mp_const_none;
     }

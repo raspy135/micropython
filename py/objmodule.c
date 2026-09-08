@@ -137,7 +137,7 @@ mp_obj_t mp_obj_new_module(qstr module_name) {
     mp_obj_dict_store(MP_OBJ_FROM_PTR(o->module.globals), MP_OBJ_NEW_QSTR(MP_QSTR___name__), MP_OBJ_NEW_QSTR(module_name));
 
     // store the new module into the slot in the global dict holding all modules
-    el->value = MP_OBJ_FROM_PTR(o);
+    mp_map_set_value(el, MP_OBJ_FROM_PTR(o));
 
     // return the new module
     return MP_OBJ_FROM_PTR(o);

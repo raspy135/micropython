@@ -106,6 +106,7 @@ typedef struct _mp_state_mem_area_t {
     #endif
 
     byte *gc_alloc_table_start;
+    uint32_t *gc_alloc_table_start_word;
     size_t gc_alloc_table_byte_len;
     #if MICROPY_ENABLE_FINALISER
     byte *gc_finaliser_table_start;
@@ -135,10 +136,19 @@ typedef struct _mp_state_mem_t {
     #endif
 
     int gc_stack_overflow;
+    #if MICROPY_GC_STACK_EXTERNAL
+    // Port-supplied buffers of MICROPY_ALLOC_GC_STACK_SIZE entries each,
+    // assigned before gc_init().  Indexed exactly like the arrays below.
+    MICROPY_GC_STACK_ENTRY_TYPE *gc_block_stack;
+    #if MICROPY_GC_SPLIT_HEAP
+    mp_state_mem_area_t **gc_area_stack;
+    #endif
+    #else
     MICROPY_GC_STACK_ENTRY_TYPE gc_block_stack[MICROPY_ALLOC_GC_STACK_SIZE];
     #if MICROPY_GC_SPLIT_HEAP
     // Array that tracks the area for each block on gc_block_stack.
     mp_state_mem_area_t *gc_area_stack[MICROPY_ALLOC_GC_STACK_SIZE];
+    #endif
     #endif
 
     // This variable controls auto garbage collection.  If set to 0 then the

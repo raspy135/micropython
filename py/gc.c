@@ -27,6 +27,7 @@
 
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "py/gc.h"
@@ -57,8 +58,7 @@
 #define BYTES_PER_BLOCK (MICROPY_BYTES_PER_GC_BLOCK)
 
 // ATB = allocation table byte
-// 0b00 = FREE -- free block
-// 0b01 = HEAD -- head of a chain of blocks
+// 0b00 = FREE -- free block// 0b01 = HEAD -- head of a chain of blocks
 // 0b10 = TAIL -- in the tail of a chain of blocks
 // 0b11 = MARK -- marked head block
 
@@ -66,17 +66,18 @@
 #define AT_HEAD (1)
 #define AT_TAIL (2)
 #define AT_MARK (3)
+#define AT_HEAD_DATA (5)
 
-#define BLOCKS_PER_ATB (4)
-#define ATB_MASK_0 (0x03)
-#define ATB_MASK_1 (0x0c)
-#define ATB_MASK_2 (0x30)
-#define ATB_MASK_3 (0xc0)
+#define BLOCKS_PER_ATB (2)
+#define ATB_MASK_0 (0x0f)
+#define ATB_MASK_1 (0xf0)
+//#define ATB_MASK_2 (0x30)
+//#define ATB_MASK_3 (0xc0)
 
 #define ATB_0_IS_FREE(a) (((a) & ATB_MASK_0) == 0)
 #define ATB_1_IS_FREE(a) (((a) & ATB_MASK_1) == 0)
-#define ATB_2_IS_FREE(a) (((a) & ATB_MASK_2) == 0)
-#define ATB_3_IS_FREE(a) (((a) & ATB_MASK_3) == 0)
+//#define ATB_2_IS_FREE(a) (((a) & ATB_MASK_2) == 0)
+//#define ATB_3_IS_FREE(a) (((a) & ATB_MASK_3) == 0)
 
 #if MICROPY_GC_SPLIT_HEAP
 #define NEXT_AREA(area) ((area)->next)
@@ -84,16 +85,31 @@
 #define NEXT_AREA(area) (NULL)
 #endif
 
-#define BLOCK_SHIFT(block) (2 * ((block) & (BLOCKS_PER_ATB - 1)))
-#define ATB_GET_KIND(area, block) (((area)->gc_alloc_table_start[(block) / BLOCKS_PER_ATB] >> BLOCK_SHIFT(block)) & 3)
-#define ATB_ANY_TO_FREE(area, block) do { area->gc_alloc_table_start[(block) / BLOCKS_PER_ATB] &= (~(AT_MARK << BLOCK_SHIFT(block))); } while (0)
-#define ATB_FREE_TO_HEAD(area, block) do { area->gc_alloc_table_start[(block) / BLOCKS_PER_ATB] |= (AT_HEAD << BLOCK_SHIFT(block)); } while (0)
-#define ATB_FREE_TO_TAIL(area, block) do { area->gc_alloc_table_start[(block) / BLOCKS_PER_ATB] |= (AT_TAIL << BLOCK_SHIFT(block)); } while (0)
-#define ATB_HEAD_TO_MARK(area, block) do { area->gc_alloc_table_start[(block) / BLOCKS_PER_ATB] |= (AT_MARK << BLOCK_SHIFT(block)); } while (0)
-#define ATB_MARK_TO_HEAD(area, block) do { area->gc_alloc_table_start[(block) / BLOCKS_PER_ATB] &= (~(AT_TAIL << BLOCK_SHIFT(block))); } while (0)
+#define BLOCK_SHIFT(block) (4 * ((block) & (BLOCKS_PER_ATB - 1)))
+#define ATB_IF_ALL_WORD_IS_TAIL(area, block) (((area)->gc_alloc_table_start_word[(block) >> 3]&0x33333333)==0x22222222)
+#define ATB_IF_ALL_BYTE_IS_TAIL(area, block) (((area)->gc_alloc_table_start[(block) >> 1]&0x33)==0x22)
+#define ATB_GET_KIND(area, block) (((area)->gc_alloc_table_start[(block) >> 1] >> BLOCK_SHIFT(block)) & 0x3)
+#define ATB_GET_KIND_FULL(area, block) (((area)->gc_alloc_table_start[(block) >> 1] >> BLOCK_SHIFT(block)) & 0xf)
+#define ATB_ANY_TO_FREE_BYTE(area, block) do { area->gc_alloc_table_start[(block) >> 1] = 0; } while(0)
+#define ATB_ANY_TO_FREE(area, block) do { area->gc_alloc_table_start[(block) >> 1] &= (~(0xf << BLOCK_SHIFT(block))); } while (0)
+#define ATB_FREE_TO_HEAD(area, block) do { area->gc_alloc_table_start[(block)  >> 1] |= (AT_HEAD << BLOCK_SHIFT(block)); } while (0)
+#define ATB_FREE_TO_TAIL(area, block) do { area->gc_alloc_table_start[(block)  >> 1] |= (AT_TAIL << BLOCK_SHIFT(block)); } while (0)
+#define ATB_HEAD_TO_MARK(area, block) do { area->gc_alloc_table_start[(block)  >> 1] |= (AT_MARK << BLOCK_SHIFT(block)); } while (0)
+#define ATB_MARK_TO_HEAD(area, block) do { area->gc_alloc_table_start[(block)  >> 1] &= (~(AT_TAIL << BLOCK_SHIFT(block))); } while (0)
+#define ATB_FREE_TO_HEAD_DATA(area, block) do { area->gc_alloc_table_start[(block)  >> 1] |= (AT_HEAD_DATA << BLOCK_SHIFT(block)); } while (0)
+// It's same as ATB_FREE_TO_HEAD
+#define ATB_MARK_TO_HEAD_DATA(area, block) do { area->gc_alloc_table_start[(block)  >> 1] |= (AT_HEAD_DATA << BLOCK_SHIFT(block)); } while (0)
 
-#define BLOCK_FROM_PTR(area, ptr) (((byte *)(ptr) - area->gc_pool_start) / BYTES_PER_BLOCK)
-#define PTR_FROM_BLOCK(area, block) (((block) * BYTES_PER_BLOCK + (uintptr_t)area->gc_pool_start))
+// ATB bit 3 is shared between two phases that never overlap: during MARK it
+// means "gray" (marked but not yet scanned), during SWEEP it means "allocated
+// during this sweep".  Marking clears every gray before the sweep is armed, so
+// the two meanings cannot collide.
+#define ATB_SET_GRAY(area, block) do { area->gc_alloc_table_start[(block) >> 1] |= (8 << BLOCK_SHIFT(block)); } while (0)
+#define ATB_CLEAR_GRAY(area, block) do { area->gc_alloc_table_start[(block) >> 1] &= ~(8 << BLOCK_SHIFT(block)); } while (0)
+#define ATB_IS_GRAY(area, block) (ATB_GET_KIND_FULL(area, block) & 8)
+
+#define BLOCK_FROM_PTR(area, ptr) (((uintptr_t)(ptr) - (uintptr_t)area->gc_pool_start) / BYTES_PER_BLOCK)
+#define PTR_FROM_BLOCK(area, block) (((uintptr_t)(block) * BYTES_PER_BLOCK + (uintptr_t)area->gc_pool_start))
 
 // After the ATB, there must be a byte filled with AT_FREE so that gc_mark_tree
 // cannot erroneously conclude that a block extends past the end of the GC heap
@@ -130,6 +146,9 @@
 #define GC_EXIT()
 #endif
 
+// prototypes needed by the incremental machinery below
+static void gc_inc_scan_static_roots(void);
+
 // Static functions for individual steps of the GC mark/sweep sequence
 static void gc_collect_start_common(void);
 static void *gc_get_ptr(void **ptrs, int i);
@@ -141,6 +160,7 @@ static void gc_mark_subtree(size_t block);
 static void gc_deal_with_stack_overflow(void);
 static void gc_sweep_run_finalisers(void);
 static void gc_sweep_free_blocks(void);
+
 
 // TODO waste less memory; currently requires that all entries in alloc_table have a corresponding block in pool
 static void gc_setup_area(mp_state_mem_area_t *area, void *start, void *end) {
@@ -169,6 +189,7 @@ static void gc_setup_area(mp_state_mem_area_t *area, void *start, void *end) {
     #endif
 
     area->gc_alloc_table_start = (byte *)start;
+    area->gc_alloc_table_start_word = (uint32_t *)start;
 
     // Allocate FTB and WTB blocks if they are enabled.
     byte *next_table = area->gc_alloc_table_start + area->gc_alloc_table_byte_len + ALLOC_TABLE_GAP_BYTE;
@@ -212,6 +233,10 @@ static void gc_setup_area(mp_state_mem_area_t *area, void *start, void *end) {
     MP_STATE_MEM(area_pool_max) = MAX(MP_STATE_MEM(area_pool_max), area->gc_pool_end);
     #endif
 
+    // NOTE: this block runs from gc_add() <- gc_try_add_heap() <- gc_alloc(),
+    // i.e. inside the allocator whenever the heap grows an area.  As blocking
+    // console output on a serial/CDC link that is tens of milliseconds with
+    // the GC lock held -- keep it debug-only.
     DEBUG_printf("GC layout:\n");
     DEBUG_printf("  alloc table at %p, length " UINT_FMT " bytes, "
         UINT_FMT " blocks\n",
@@ -260,8 +285,13 @@ void gc_init(void *start, void *end) {
     MP_STATE_MEM(gc_auto_collect_enabled) = 1;
 
     #if MICROPY_GC_ALLOC_THRESHOLD
+    #if MICROPY_GC_INCREMENTAL
+    // Incremental GC collects ahead of pressure via the adaptive threshold.
+    MP_STATE_MEM(gc_alloc_threshold) = MICROPY_GC_INCR_TRIGGER_BLOCKS;
+    #else
     // by default, maxuint for gc threshold, effectively turning gc-by-threshold off
     MP_STATE_MEM(gc_alloc_threshold) = (size_t)-1;
+    #endif
     MP_STATE_MEM(gc_alloc_amount) = 0;
     #endif
 
@@ -360,6 +390,12 @@ static bool gc_try_add_heap(size_t failed_alloc) {
     // Round up size to the nearest multiple of BYTES_PER_BLOCK.
     total_heap = (total_heap + BYTES_PER_BLOCK - 1) & (~(BYTES_PER_BLOCK - 1));
 
+    #ifdef MICROPY_GC_MAX_NEW_AREA_SIZE
+    if (total_heap > MICROPY_GC_MAX_NEW_AREA_SIZE) {
+        total_heap = MICROPY_GC_MAX_NEW_AREA_SIZE;
+    }
+    #endif
+
     DEBUG_printf("total_heap " UINT_FMT " bytes\n", total_heap);
 
     size_t to_alloc = MIN(avail, MAX(total_heap, needed));
@@ -377,7 +413,7 @@ static bool gc_try_add_heap(size_t failed_alloc) {
         return false;
     }
 
-    gc_add(new_heap, (void *)new_heap + to_alloc);
+    gc_add(new_heap, (void *)((char *)new_heap + to_alloc));
 
     return true;
 }
@@ -400,6 +436,14 @@ void gc_unlock(void) {
 
 bool gc_is_locked(void) {
     return MP_STATE_THREAD(gc_lock_depth) != 0;
+}
+
+// See the comment in gc.h. Only ever touched between gc_collect_start_common()
+// and gc_collect_end(), which (under the GIL) never overlap across threads.
+static volatile bool gc_collecting_flag = false;
+
+bool gc_is_collecting(void) {
+    return gc_collecting_flag;
 }
 
 #if MICROPY_GC_SPLIT_HEAP
@@ -440,6 +484,246 @@ static mp_state_mem_area_t *gc_get_ptr_area(const void *ptr) {
 
 #endif
 
+#if MICROPY_GC_INCREMENTAL
+// ============================ incremental GC core ==========================
+
+volatile uint8_t mp_gc_mark_active;         // 0 = idle, 1 = mark phase running
+static uint8_t gc_inc_enabled = 1;          // runtime switch (gc.incremental())
+static bool gc_inc_mark_only;               // set while scanning roots: mark+queue, no DFS
+static bool gc_inc_in_step;                 // re-entrancy guard for step/finish
+static uint32_t gc_inc_gray_sp;             // gray set stack pointer
+static uint32_t gc_inc_slice_words = MICROPY_GC_INCR_SLICE_WORDS;
+
+// Slice pacing: slices ride on gc_alloc(), but allocation-heavy code allocates
+// thousands of times per frame, so slices are rate-limited by wall clock
+// (gap) and individually capped in duration (cap).  Both tunable via gc.pace().
+static uint32_t gc_inc_gap_us = MICROPY_GC_INCR_SLICE_GAP_US;
+static uint32_t gc_inc_cap_us = MICROPY_GC_INCR_SLICE_CAP_US;
+static uint32_t gc_inc_next_slice_us;
+static uint8_t gc_inc_alloc_ctr; // allocator-side sampling counter (1-in-8)
+
+#if MICROPY_GC_USTIME_AVAILABLE
+static inline uint32_t gc_inc_now_us(void) {
+    return (uint32_t)MICROPY_GC_PORT_USTIME();
+}
+static inline bool gc_inc_due(void) {
+    // signed compare survives the 32-bit microsecond counter wrap (~71 min)
+    return (int32_t)(gc_inc_now_us() - gc_inc_next_slice_us) >= 0;
+}
+static inline bool gc_inc_over_cap(uint32_t t0) {
+    return (uint32_t)(gc_inc_now_us() - t0) > gc_inc_cap_us;
+}
+#else
+static inline bool gc_inc_due(void) {
+    return true;
+}
+static inline bool gc_inc_over_cap(uint32_t t0) {
+    return false;
+}
+#endif
+
+// Cycle phases for mp_gc_mark_active.
+#define GC_INC_PHASE_IDLE  (0)
+#define GC_INC_PHASE_MARK  (1)
+#define GC_INC_PHASE_SWEEP (2)
+
+// Sliced-sweep cursor state (see gc_inc_sweep_step).
+static mp_state_mem_area_t *gc_inc_sw_area;
+static size_t gc_inc_sw_free;   // free blocks tallied by the current sweep
+static size_t gc_inc_sw_block;
+static int gc_inc_sw_free_tail;
+static size_t gc_inc_sw_last_used;
+#if MICROPY_GC_SPLIT_HEAP_AUTO
+static mp_state_mem_area_t *gc_inc_sw_prev_area;
+#endif
+
+// True if any of the 8 ATB nibbles covered by a word-skip has the bit-8
+// "born during sweep" tag set.  Tagged nibbles must not be consumed by the
+// all-tail fast skips (grown tails carry TAIL|8, which kind-masks to TAIL).
+static bool gc_inc_tag_word8(const mp_state_mem_area_t *area, size_t block) {
+    const uint8_t *b = &area->gc_alloc_table_start[block >> 1];
+    return (b[0] | b[1] | b[2] | b[3]) & 0x88;
+}
+static bool gc_inc_tag_byte8(const mp_state_mem_area_t *area, size_t block) {
+    return area->gc_alloc_table_start[block >> 1] & 0x88;
+}
+
+// Simple counters for visibility into the incremental collector (gc.stats()).
+enum {
+    GC_INC_ST_CYCLES = 0,     // cycles started
+    GC_INC_ST_SLICES,         // bounded mark slices executed from gc_alloc
+    GC_INC_ST_SLICE_ENDS,     // cycles whose marking finished inside a slice
+    GC_INC_ST_SYNC_ENDS,      // cycles completed synchronously (gc.collect or OOM)
+    GC_INC_ST_OVERFLOWS,      // gray-set overflows handled by full-table resolver
+    GC_INC_ST_WORDS,          // total heap words scanned (mark work volume)
+    GC_INC_ST_ABORTS,         // cycles abandoned (soft reset)
+    GC_INC_ST_ROOTS_US,       // cumulative microseconds spent in root scans (STW)
+    GC_INC_ST_SWEEP_US,       // cumulative microseconds spent in sweep pieces (STW)
+    GC_INC_ST_MAX_SWEEP_US,   // longest single stop-the-world piece observed
+    GC_INC_ST_FIN_US,         // finaliser pass (subset of sweep_us)
+    GC_INC_ST_WALK_US,        // sliced table free-walk total (subset of sweep_us)
+    GC_INC_ST_MAX_SLICE_US,   // longest single mark slice (per-alloc surcharge)
+    GC_INC_ST_MARK_US,        // cumulative time in mark slices (the missing
+                              // counterpart to sweep_us/roots_us)
+    GC_INC_ST_DRAIN_US,       // final synchronous drain at end of marking (STW)
+    GC_INC_ST_MAX_DRAIN_US,   // longest single final drain -- the frame killer
+    GC_INC_ST_FINAL_WORDS,    // words scanned in final drains (vs WORDS total):
+                              // the share of marking that did NOT go incremental
+    GC_INC_ST_WALK_BLOCKS,    // ATB blocks visited by gray-overflow resolver walks
+    GC_INC_ST_MAX_ALLOC_US,   // longest TOTAL GC time inside one gc_alloc()
+                              // call (all retry iterations summed).  This is
+                              // what a frame actually feels; the other max_*
+                              // counters only bound one individual piece.
+    GC_INC_ST_MAX_RETRIES,    // most collect/sweep retries in one gc_alloc()
+    GC_INC_ST_ALLOC_STALL_US, // cumulative of the same, all calls
+    GC_INC_ST_MAX_GRAY,       // high-water mark of the gray set, in entries.
+                              // Size MICROPY_ALLOC_GC_STACK_SIZE above this to
+                              // get overflows to zero (the reading is only
+                              // meaningful once it is not already clipping).
+    GC_INC_ST_OOM,            // TEMP: gc_alloc found no free block
+    GC_INC_ST_STEP_CALLS,     // TEMP: gc_incremental_step() invocations
+    GC_INC_ST_STEP_IDLE,      // TEMP: ... returned early, no cycle active
+    GC_INC_ST_STEP_NOTDUE,    // TEMP: ... returned early, pacing gap not elapsed
+    GC_INC_ST_THRESH_HITS,    // TEMP: gc_alloc threshold branch taken
+    GC_INC_ST_START_CALLS,    // TEMP: gc_incremental_start() invocations
+    GC_INC_ST_START_BUSY,     // TEMP: ... returned early (cycle already active)
+    GC_INC_ST_N
+};
+static uint32_t gc_inc_stats[GC_INC_ST_N];
+
+void gc_incremental_get_stats(uint32_t *out) {
+    memcpy(out, gc_inc_stats, GC_INC_ST_N * sizeof(uint32_t));
+}
+
+// Runtime-tunable slice budget (words of heap scanned per gc_alloc call).
+// Lower = smoother frame pacing, longer wall-clock time per cycle.
+uint32_t gc_incremental_set_slice_words(uint32_t w) {
+    if (w >= 16) {
+        gc_inc_slice_words = w;
+    }
+    return gc_inc_slice_words;
+}
+
+// Slice pacing control (see MICROPY_GC_INCR_SLICE_GAP_US / _CAP_US).
+// gap_us: minimum wall-clock gap between two slices (bounds GC duty cycle)
+// cap_us: hard per-slice runtime cap (bounds per-allocation surcharge)
+void gc_incremental_set_pace(uint32_t gap_us, uint32_t cap_us) {
+    if (gap_us >= 10) {
+        gc_inc_gap_us = gap_us;
+    }
+    if (cap_us >= 10 && cap_us <= 100000) {
+        gc_inc_cap_us = cap_us;
+    }
+}
+
+void gc_incremental_get_pace(uint32_t *gap_us, uint32_t *cap_us) {
+    *gap_us = gc_inc_gap_us;
+    *cap_us = gc_inc_cap_us;
+}
+
+bool gc_incremental_enabled(void) {
+    return gc_inc_enabled;
+}
+
+void gc_incremental_set_enabled(bool on) {
+    gc_inc_enabled = on ? 1 : 0;
+}
+
+bool gc_incremental_active(void) {
+    return mp_gc_mark_active != 0;
+}
+
+// Push an already-marked block onto the gray set (reuses the existing
+// gc_block_stack/gc_area_stack static arrays -- no new RAM).  On overflow the
+// resolver fallback is flagged; it re-derives all marked blocks by a table
+// walk (same fallback behaviour as the classic collector).
+static void gc_inc_gray_push(mp_state_mem_area_t *area, size_t block) {
+    if (gc_inc_gray_sp >= MICROPY_ALLOC_GC_STACK_SIZE) {
+        MP_STATE_MEM(gc_stack_overflow) = 1;
+        return;
+    }
+    if (gc_inc_gray_sp >= gc_inc_stats[GC_INC_ST_MAX_GRAY]) {
+        gc_inc_stats[GC_INC_ST_MAX_GRAY] = gc_inc_gray_sp + 1;
+    }
+    MP_STATE_MEM(gc_block_stack)[gc_inc_gray_sp] = block;
+    #if MICROPY_GC_SPLIT_HEAP
+    MP_STATE_MEM(gc_area_stack)[gc_inc_gray_sp] = area;
+    #endif
+    gc_inc_gray_sp += 1;
+}
+
+static void gc_inc_mark_gray(mp_state_mem_area_t *area, size_t block) {
+    ATB_HEAD_TO_MARK(area, block);
+    ATB_SET_GRAY(area, block);
+    gc_inc_gray_push(area, block);
+}
+
+// If ptr points at an unscanned (white/HEAD) heap object, mark it gray.
+static void gc_inc_mark_head(void *ptr) {
+    #if MICROPY_GC_SPLIT_HEAP
+    mp_state_mem_area_t *area = gc_verify_ptr_get_area(ptr);
+    if (!area) {
+        return;
+    }
+    #else
+    if (!VERIFY_PTR(ptr)) {
+        return;
+    }
+    mp_state_mem_area_t *area = &MP_STATE_MEM(area);
+    #endif
+    size_t block = BLOCK_FROM_PTR(area, ptr);
+    if (ATB_GET_KIND(area, block) != AT_HEAD) {
+        return; // already marked, a tail block, or not an object head
+    }
+    gc_inc_mark_gray(area, block);
+}
+
+void gc_barrier(uintptr_t maybe_ptr) {
+    gc_inc_mark_head((void *)maybe_ptr);
+}
+
+// Barrier a run of consecutive mp_obj_t slots about to be copied into a
+// container.  Cheaper than N separate GC_BARRIER calls: the phase test is
+// hoisted out by the GC_BARRIER_N macro.
+void gc_barrier_range(const void *slots, size_t n) {
+    const mp_obj_t *p = (const mp_obj_t *)slots;
+    for (size_t i = 0; i < n; i++) {
+        mp_obj_t v = p[i];
+        if (mp_obj_is_obj(v)) {
+            gc_inc_mark_head((void *)v);
+        }
+    }
+}
+
+void gc_gray_mark_ptr(void *ptr) {
+    if (mp_gc_mark_active != GC_INC_PHASE_MARK || ptr == NULL) {
+        return;
+    }
+    #if MICROPY_GC_SPLIT_HEAP
+    mp_state_mem_area_t *area = gc_verify_ptr_get_area(ptr);
+    if (!area) {
+        return;
+    }
+    #else
+    if (!VERIFY_PTR(ptr)) {
+        return;
+    }
+    mp_state_mem_area_t *area = &MP_STATE_MEM(area);
+    #endif
+    size_t block = BLOCK_FROM_PTR(area, ptr);
+    size_t kind = ATB_GET_KIND(area, block);
+    if (kind == AT_HEAD) {
+        gc_inc_mark_gray(area, block);
+    } else if (kind == AT_MARK) {
+        // Already marked (possibly already scanned): requeue so that slots
+        // added by the realloc (grown tail blocks) get rescanned.
+        ATB_SET_GRAY(area, block);
+        gc_inc_gray_push(area, block);
+    }
+}
+
+#endif // MICROPY_GC_INCREMENTAL
+
 #ifdef TRACE_MARK
 #error "TRACE_MARK is replaced by TRACE_MARK_R and TRACE_MARK_S"
 #endif
@@ -461,13 +745,19 @@ static mp_state_mem_area_t *gc_get_ptr_area(const void *ptr) {
 
 void gc_collect_start(void) {
     gc_collect_start_common();
-    #if MICROPY_GC_ALLOC_THRESHOLD
+    #if MICROPY_GC_ALLOC_THRESHOLD && !MICROPY_GC_INCREMENTAL
     MP_STATE_MEM(gc_alloc_amount) = 0;
     #endif
+    gc_inc_scan_static_roots();
+}
 
+// Scan the static root set: mp_state_ctx root region + the pystack.
+// (C stack / registers / other threads are scanned by the port via
+// MICROPY_GC_PORT_STACK_ROOTS().)
+static void gc_inc_scan_static_roots(void) {
     // Trace root pointers.  This relies on the root pointers being organised
-    // correctly in the mp_state_ctx structure.  We scan nlr_top, dict_locals,
-    // dict_globals, then the root pointer section of mp_state_vm.
+    // correctly in the mp_state_ctx structure.  We scan nlr_top,
+    // dict_locals, dict_globals, then the root pointer section of mp_state_vm.
     void **ptrs = (void **)(void *)&mp_state_ctx;
     size_t root_start = offsetof(mp_state_ctx_t, thread.dict_locals);
     size_t root_end = offsetof(mp_state_ctx_t, vm.qstr_last_chunk);
@@ -485,6 +775,7 @@ static void gc_collect_start_common(void) {
     assert((MP_STATE_THREAD(gc_lock_depth) & GC_COLLECT_FLAG) == 0);
     MP_STATE_THREAD(gc_lock_depth) |= GC_COLLECT_FLAG;
     MP_STATE_MEM(gc_stack_overflow) = 0;
+    gc_collecting_flag = true;
 }
 
 void gc_collect_root(void **ptrs, size_t len) {
@@ -509,11 +800,29 @@ void gc_collect_root(void **ptrs, size_t len) {
             // An unmarked head: mark it, and mark all its children
             TRACE_MARK_R(ptr_block, ptr);
             ATB_HEAD_TO_MARK(area, block);
+            #if MICROPY_GC_INCREMENTAL
+            if (gc_inc_mark_only) {
+                // Root scan of an incremental cycle: just queue for later
+                // slice-wise scanning, don't descend recursively here.
+                // Must tag gray as well as queue: if the gray set later
+                // overflows and is dropped, the resolver walk finds blocks
+                // by the gray bit, and an untagged root would be skipped --
+                // its children would then never be marked.
+                ATB_SET_GRAY(area, block);
+                gc_inc_gray_push(area, block);
+                continue;
+            }
+            #endif
+            if((ATB_GET_KIND_FULL(area, block)&4) == 0){
+
             #if MICROPY_GC_SPLIT_HEAP
-            gc_mark_subtree(area, block);
+              gc_mark_subtree(area, block);
             #else
             gc_mark_subtree(block);
             #endif
+            }else{
+              //printf("root HEAD_DATA found, skip scanning\n");
+            }
         }
     }
 }
@@ -537,16 +846,25 @@ static void gc_mark_subtree(size_t block)
 
         // work out number of consecutive blocks in the chain starting with this one
         size_t n_blocks = 0;
+
+        if ((ATB_GET_KIND_FULL(area, block)&4)) {
+          n_blocks = 0;
+        }else{
         do {
-            n_blocks += 1;
+          n_blocks += 1;
+          //if(n_blocks > 500){ n_blocks = 2; break; }
         } while (ATB_GET_KIND(area, block + n_blocks) == AT_TAIL);
+        }
+        //if(n_blocks > 1000){
+        //  printf("bigone %d\n", n_blocks);
+        //}
 
         // check that the consecutive blocks didn't overflow past the end of the area
         assert(area->gc_pool_start + (block + n_blocks) * BYTES_PER_BLOCK <= area->gc_pool_end);
 
         // check this block's children
         void **ptrs = (void **)PTR_FROM_BLOCK(area, block);
-        for (size_t i = n_blocks * BYTES_PER_BLOCK / sizeof(void *); i > 0; i--, ptrs++) {
+        for (size_t i = n_blocks * (BYTES_PER_BLOCK / sizeof(void *)); i > 0; i--, ptrs++) {
             MICROPY_GC_HOOK_LOOP(i);
             void *ptr = *ptrs;
             // If this is a heap pointer that hasn't been marked, mark it and push
@@ -571,6 +889,7 @@ static void gc_mark_subtree(size_t block)
             // An unmarked head. Mark it, and push it on gc stack.
             TRACE_MARK_S(ptr_block, ptr);
             ATB_HEAD_TO_MARK(ptr_area, ptr_block);
+            if ((ATB_GET_KIND_FULL(ptr_area, ptr_block)&4) == 0) {
             if (sp < MICROPY_ALLOC_GC_STACK_SIZE) {
                 MP_STATE_MEM(gc_block_stack)[sp] = ptr_block;
                 #if MICROPY_GC_SPLIT_HEAP
@@ -579,8 +898,29 @@ static void gc_mark_subtree(size_t block)
                 sp += 1;
             } else {
                 MP_STATE_MEM(gc_stack_overflow) = 1;
+                //printf("gc stack overflow\n");
+            }
             }
         }
+        /*
+        if(n_blocks >3000){
+          if((!found)){// || n_blocks > 1000){
+            //printf("data: %d, %d\n", block, n_blocks);
+            if ((ATB_GET_KIND_FULL(area, block)&8)) {
+              //printf("data: %d, %d\n", block, n_blocks);
+              ATB_MARK_TO_HEAD_DATA(area, block);
+            }else{
+              //printf("candidate: %d, %d\n", block, n_blocks);
+              //ATB_FREE_TO_HEAD_DATA_CANDIDATE(area, block);
+            }
+          }else{
+            //printf("ptr: %d, %d\n", block, n_blocks);
+            if ((ATB_GET_KIND_FULL(area,block)&8)) {
+              //ATB_REMOVE_HEAD_DATA_CANDIDATE(area, block);
+            }
+          }
+        }
+        */
 
         // Are there any blocks on the stack?
         if (sp == 0) {
@@ -597,6 +937,12 @@ static void gc_mark_subtree(size_t block)
 }
 
 void gc_sweep_all(void) {
+    #if MICROPY_GC_INCREMENTAL
+    // Called e.g. on soft reset with an incremental cycle possibly in progress:
+    // drop the cycle and turn partial marks back into heads so that the sweep
+    // below really frees everything.
+    gc_incremental_abort();
+    #endif
     gc_collect_start_common();
     gc_collect_end();
 }
@@ -612,6 +958,7 @@ void gc_collect_end(void) {
         area->gc_last_free_atb_index = 0;
     }
     MP_STATE_THREAD(gc_lock_depth) &= ~GC_COLLECT_FLAG;
+    gc_collecting_flag = false;
     GC_EXIT();
     #if MICROPY_PY_WEAKREF
     gc_weakref_sweep();
@@ -713,11 +1060,43 @@ static void gc_sweep_free_blocks(void) {
     #endif
 
     for (mp_state_mem_area_t *area = &MP_STATE_MEM(area); area != NULL; area = NEXT_AREA(area)) {
-        size_t last_used_block = 0;
+      size_t last_used_block = 0;
         assert(area->gc_last_used_block <= area->gc_alloc_table_byte_len * BLOCKS_PER_ATB);
 
         for (size_t block = 0; block <= area->gc_last_used_block; block++) {
             MICROPY_GC_HOOK_LOOP(block);
+            //If the entire byte of ATB is tail,
+            if ((block & 7) == 0 && area->gc_alloc_table_start_word[block >> 3] == 0) {
+                // see the matching skip in gc_inc_sweep_step()
+                block += 7; // the for-loop adds the 8th
+                continue;
+            }
+            if((block&7) == 0){
+              if(ATB_IF_ALL_WORD_IS_TAIL(area, block)){
+                //printf("hit\n");
+                if(free_tail){
+                  ATB_ANY_TO_FREE_BYTE(area, block);
+                  ATB_ANY_TO_FREE_BYTE(area, block+2);
+                  ATB_ANY_TO_FREE_BYTE(area, block+4);
+                  ATB_ANY_TO_FREE_BYTE(area, block+6);
+                }
+                block+=7;
+                if(!free_tail){
+                  last_used_block = block;
+                }
+                continue;
+              }
+            }
+            if((block&1) == 0){
+              if(ATB_IF_ALL_BYTE_IS_TAIL(area, block)){
+                if(free_tail) ATB_ANY_TO_FREE_BYTE(area, block);
+                block++;
+                if(!free_tail){
+                  last_used_block = block;
+                }
+                continue;
+              }
+            }
             switch (ATB_GET_KIND(area, block)) {
                 case AT_HEAD:
                     free_tail = 1;
@@ -730,7 +1109,12 @@ static void gc_sweep_free_blocks(void) {
 
                 case AT_TAIL:
                     if (free_tail) {
+                      //while(ATB_GET_KIND(area, block) == AT_TAIL && block <= area->gc_last_used_block){
                         ATB_ANY_TO_FREE(area, block);
+                        //block++;
+                        //}
+                      //block--;
+                      //ATB_ANY_TO_FREE(area, block);
                         #if CLEAR_ON_SWEEP
                         memset((void *)PTR_FROM_BLOCK(area, block), 0, BYTES_PER_BLOCK);
                         #endif
@@ -740,7 +1124,7 @@ static void gc_sweep_free_blocks(void) {
                     break;
 
                 case AT_MARK:
-                    ATB_MARK_TO_HEAD(area, block);
+                  ATB_MARK_TO_HEAD(area, block);
                     free_tail = 0;
                     last_used_block = block;
                     break;
@@ -761,6 +1145,656 @@ static void gc_sweep_free_blocks(void) {
         #endif
     }
 }
+
+#if MICROPY_GC_INCREMENTAL
+// ---------------------------------------------------------------------------
+// Incremental cycle machinery.
+//
+// Conservative scan of one marked block chain, pushing discovered heads onto
+// the gray set.  Costs `n_words` against *budget (whole chains are scanned
+// atomically -- chains are small except for data blocks, whose contents are
+// not scanned at all).  Same pointer test logic as gc_mark_subtree().
+static bool gc_inc_final_drain; // true while the end-of-cycle STW drain runs
+
+static void gc_inc_scan_chain(mp_state_mem_area_t *area, size_t block, uint32_t *budget) {
+    size_t n_blocks = 0;
+    ATB_CLEAR_GRAY(area, block); // scanning it now -> black
+    if (ATB_GET_KIND_FULL(area, block) & 4) {
+        // data block: contents are not scanned for pointers (same rule as the
+        // classic collector's IS_DATA allocation flag)
+        return;
+    }
+    do {
+        n_blocks += 1;
+    } while (ATB_GET_KIND(area, block + n_blocks) == AT_TAIL);
+    assert(area->gc_pool_start + (block + n_blocks) * BYTES_PER_BLOCK <= area->gc_pool_end);
+
+    void **ptrs = (void **)PTR_FROM_BLOCK(area, block);
+    size_t n_words = n_blocks * WORDS_PER_BLOCK;
+    gc_inc_stats[GC_INC_ST_WORDS] += n_words;
+    if (gc_inc_final_drain) {
+        gc_inc_stats[GC_INC_ST_FINAL_WORDS] += n_words;
+    }
+    for (size_t i = 0; i < n_words; i++, ptrs++) {
+        MICROPY_GC_HOOK_LOOP(i);
+        void *ptr = *ptrs;
+        #if MICROPY_GC_SPLIT_HEAP
+        mp_state_mem_area_t *ptr_area = gc_verify_ptr_get_area(ptr);
+        if (!ptr_area) {
+            continue;
+        }
+        #else
+        if (!VERIFY_PTR(ptr)) {
+            continue;
+        }
+        mp_state_mem_area_t *ptr_area = area;
+        #endif
+        size_t ptr_block = BLOCK_FROM_PTR(ptr_area, ptr);
+        if (ATB_GET_KIND(ptr_area, ptr_block) != AT_HEAD) {
+            // already marked / tail / interior pointer
+            continue;
+        }
+        gc_inc_mark_gray(ptr_area, ptr_block);
+    }
+
+    if (n_words > *budget) {
+        *budget = 0;
+    } else {
+        *budget -= n_words;
+    }
+}
+
+// Drain the gray set until budget exhausted.  Returns true when marking is
+// complete (gray set empty and no overflow pending).
+//
+// Overflow handling is itself incremental: when the gray set overflows the
+// queue is dropped (all its entries are AT_MARK blocks and remain discoverable
+// by a table walk) and a budgeted, cursor-based table walk takes over until
+// one full clean pass completes.  Unlike the classic resolver, which repeats
+// an unbounded full walk per overflow, this never restarts mid-pass, so the
+// walk cost is spread across slices like normal mark work.
+static mp_state_mem_area_t *gc_inc_walk_area;
+static size_t gc_inc_walk_block;
+static bool gc_inc_walk_pending;
+
+static bool gc_inc_drain(uint32_t max_words) {
+    uint32_t budget = max_words;
+    #if MICROPY_GC_USTIME_AVAILABLE
+    uint32_t t0 = gc_inc_now_us();
+    #endif
+    uint32_t iters = 0;
+    for (;;) {
+        while (gc_inc_gray_sp > 0 && budget > 0) {
+            // Periodic timing check.  This must count iterations: gating on
+            // gc_inc_gray_sp meant gating on the *stack depth*, which rises
+            // and falls as children are pushed, so a traversal whose depth
+            // never lands on a multiple of 8 at the top of the loop skipped
+            // the cap entirely and the slice ran unbounded.
+            if ((++iters & 7) == 0 && gc_inc_over_cap(t0)) {
+                return false;
+            }
+            gc_inc_gray_sp -= 1;
+            size_t block = MP_STATE_MEM(gc_block_stack)[gc_inc_gray_sp];
+            #if MICROPY_GC_SPLIT_HEAP
+            mp_state_mem_area_t *area = MP_STATE_MEM(gc_area_stack)[gc_inc_gray_sp];
+            #else
+            mp_state_mem_area_t *area = &MP_STATE_MEM(area);
+            #endif
+            gc_inc_scan_chain(area, block, &budget);
+        }
+        if (MP_STATE_MEM(gc_stack_overflow)) {
+            // Gray set overflowed: drop it (entries are all AT_MARK blocks that
+            // the walk below will rediscover) and start a full clean pass.
+            MP_STATE_MEM(gc_stack_overflow) = 0;
+            gc_inc_gray_sp = 0;
+            gc_inc_stats[GC_INC_ST_OVERFLOWS] += 1;
+            gc_inc_walk_pending = true;
+            gc_inc_walk_area = &MP_STATE_MEM(area);
+            gc_inc_walk_block = 0;
+        }
+        if (gc_inc_walk_pending) {
+            // Budgeted table walk: scan every AT_MARK block from the cursor.
+            // Scanning an already-scanned block is harmless (idempotent).
+            bool pass_done = false;
+            while (gc_inc_walk_area != NULL && budget > 0) {
+                mp_state_mem_area_t *area = gc_inc_walk_area;
+                size_t block = gc_inc_walk_block;
+                size_t block_end = area->gc_alloc_table_byte_len * BLOCKS_PER_ATB;
+                for (; block < block_end && budget > 0; block++) {
+                    MICROPY_GC_HOOK_LOOP(block);
+                    gc_inc_stats[GC_INC_ST_WALK_BLOCKS] += 1;
+                    if ((block & 31) == 0 && gc_inc_over_cap(t0)) {
+                        budget = 0; // must also end the outer walk loop
+                        break;
+                    }
+                    if (ATB_GET_KIND(area, block) == AT_MARK && ATB_IS_GRAY(area, block)) {
+                        gc_inc_scan_chain(area, block, &budget);
+                    }
+                }
+                if (block >= block_end) {
+                    #if MICROPY_GC_SPLIT_HEAP
+                    gc_inc_walk_area = NEXT_AREA(area);
+                    #else
+                    gc_inc_walk_area = NULL;
+                    #endif
+                    gc_inc_walk_block = 0;
+                } else {
+                    gc_inc_walk_block = block;
+                }
+                if (MP_STATE_MEM(gc_stack_overflow)) {
+                    // Overflowed again during the walk: restart a clean pass
+                    // (progress is guaranteed: marking only ever grows).
+                    break;
+                }
+            }
+            if (!MP_STATE_MEM(gc_stack_overflow) && gc_inc_walk_area == NULL) {
+                gc_inc_walk_pending = false;
+                pass_done = true;
+            }
+            if (pass_done) {
+                continue; // gray set may now have entries; keep draining
+            }
+            return false; // budget exhausted (or new overflow), resume later
+        }
+        return gc_inc_gray_sp == 0;
+    }
+}
+
+// Scan the complete root set (statics, pystack, C stacks, other threads).
+static void gc_inc_scan_all_roots(void) {
+    #if MICROPY_GC_USTIME_AVAILABLE
+    uint32_t t0 = (uint32_t)MICROPY_GC_PORT_USTIME();
+    #endif
+    gc_inc_mark_only = true;
+    gc_inc_scan_static_roots();
+    MICROPY_GC_PORT_STACK_ROOTS();
+    gc_inc_mark_only = false;
+    #if MICROPY_GC_USTIME_AVAILABLE
+    gc_inc_stats[GC_INC_ST_ROOTS_US] += (uint32_t)MICROPY_GC_PORT_USTIME() - t0;
+    #endif
+}
+
+// One budgeted slice of the table free-walk.  Resumable mirror of
+// gc_sweep_free_blocks(): frees unmarked chains, demotes AT_MARK survivors to
+// AT_HEAD, and treats blocks tagged "born during sweep" (ATB top bit, set by
+// gc_alloc/gc_realloc while phase==SWEEP) as live -- also breaking any
+// in-progress free_tail chain so a new object's tail blocks are never eaten.
+// Returns true when every area has been fully swept.
+static bool gc_inc_sweep_step(uint32_t budget_blocks) {
+    int32_t budget = (int32_t)(budget_blocks > 0x40000000u ? 0x40000000u : budget_blocks);
+    #if MICROPY_GC_USTIME_AVAILABLE
+    uint32_t t0 = (uint32_t)MICROPY_GC_PORT_USTIME();
+    #endif
+    while (gc_inc_sw_area != NULL && budget > 0) {
+        mp_state_mem_area_t *area = gc_inc_sw_area;
+        size_t block = gc_inc_sw_block;
+        int free_tail = gc_inc_sw_free_tail;
+        size_t last_used = gc_inc_sw_last_used;
+        while (block <= area->gc_last_used_block && budget > 0) {
+            MICROPY_GC_HOOK_LOOP(block);
+            if ((block & 31) == 0 && gc_inc_over_cap(t0)) {
+                budget = 0; // must also end the OUTER loop (state saved below)
+                break;
+            }
+            // 8-block skip over an all-free ATB word.  Without this the sweep
+            // visits every free block individually, so a heap that has just
+            // become mostly garbage (big app quit) costs a full block-by-block
+            // walk of the whole heap on *every* cycle -- the dominant sweep
+            // cost on a large PSRAM heap.  A zero word means 8 x AT_FREE with
+            // no flag bits, so there is nothing to do but step over it.
+            if ((block & 7) == 0 && area->gc_alloc_table_start_word[block >> 3] == 0) {
+                block += 8;
+                budget -= 8;
+                gc_inc_sw_free += 8;
+                continue;
+            }
+            // same 8-block (word) fast skip as the classic sweep
+            if ((block & 7) == 0) {
+                if (ATB_IF_ALL_WORD_IS_TAIL(area, block) && !gc_inc_tag_word8(area, block)) {
+                    if (free_tail) {
+                        ATB_ANY_TO_FREE_BYTE(area, block);
+                        ATB_ANY_TO_FREE_BYTE(area, block + 2);
+                        ATB_ANY_TO_FREE_BYTE(area, block + 4);
+                        ATB_ANY_TO_FREE_BYTE(area, block + 6);
+                        gc_inc_sw_free += 8;
+                    }
+                    block += 8;
+                    budget -= 8;
+                    if (!free_tail) {
+                        last_used = block - 1;
+                    }
+                    continue;
+                }
+            }
+            // same 2-block (byte) fast skip
+            if ((block & 1) == 0) {
+                if (ATB_IF_ALL_BYTE_IS_TAIL(area, block) && !gc_inc_tag_byte8(area, block)) {
+                    if (free_tail) {
+                        ATB_ANY_TO_FREE_BYTE(area, block);
+                        gc_inc_sw_free += 2;
+                    }
+                    block += 2;
+                    budget -= 2;
+                    if (!free_tail) {
+                        last_used = block - 1;
+                    }
+                    continue;
+                }
+            }
+            if (ATB_GET_KIND_FULL(area, block) & 8) {
+                // Allocated during this sweep: live for the next cycle.
+                // The tag MUST be cleared here, and an AT_MARK left over from
+                // a previous cycle demoted, or the block stays permanently
+                // tagged: the next mark phase then skips it (kind != AT_HEAD)
+                // and its children are collected while it still points at them.
+                area->gc_alloc_table_start[block >> 1] &= ~(8 << BLOCK_SHIFT(block));
+                if (ATB_GET_KIND(area, block) == AT_MARK) {
+                    ATB_MARK_TO_HEAD(area, block);
+                }
+                free_tail = 0;
+                last_used = block;
+                block += 1;
+                budget -= 1;
+                continue;
+            }
+            switch (ATB_GET_KIND(area, block)) {
+                case AT_FREE:
+                    gc_inc_sw_free += 1;
+                    break;
+                case AT_HEAD:
+                    free_tail = 1;
+                    MP_FALLTHROUGH
+                case AT_TAIL:
+                    if (free_tail) {
+                        ATB_ANY_TO_FREE(area, block);
+                        gc_inc_sw_free += 1;
+                    } else {
+                        last_used = block;
+                    }
+                    break;
+                case AT_MARK:
+                    ATB_MARK_TO_HEAD(area, block);
+                    free_tail = 0;
+                    last_used = block;
+                    break;
+            }
+            block += 1;
+            budget -= 1;
+        }
+        gc_inc_sw_block = block;
+        gc_inc_sw_free_tail = free_tail;
+        gc_inc_sw_last_used = last_used;
+        if (block <= area->gc_last_used_block) {
+            #if MICROPY_GC_USTIME_AVAILABLE
+            uint32_t dur = gc_inc_now_us() - t0;
+            gc_inc_stats[GC_INC_ST_WALK_US] += dur;
+            gc_inc_stats[GC_INC_ST_SWEEP_US] += dur;
+            if (dur > gc_inc_stats[GC_INC_ST_MAX_SWEEP_US]) {
+                gc_inc_stats[GC_INC_ST_MAX_SWEEP_US] = dur;
+            }
+            #endif
+            return false; // budget exhausted mid-area, resume next slice
+        }
+        // this area is fully swept: its space is now fully available
+        area->gc_last_used_block = last_used;
+        area->gc_last_free_atb_index = 0;
+        #if MICROPY_GC_SPLIT_HEAP
+        mp_state_mem_area_t *next_area;
+        #if MICROPY_GC_SPLIT_HEAP_AUTO
+        if (last_used == 0 && gc_inc_sw_prev_area != NULL) {
+            NEXT_AREA(gc_inc_sw_prev_area) = NEXT_AREA(area);
+            // This area pointer dies here, but unlike the classic STW sweep,
+            // mutators run between slices: any cached pointer to this area
+            // (notably gc_last_free_area, used as the alloc starting point)
+            // would let a later allocation scribble into PSRAM already given
+            // back to the OS.  Make sure no such pointer survives.
+            if (MP_STATE_MEM(gc_last_free_area) == area) {
+                MP_STATE_MEM(gc_last_free_area) = &MP_STATE_MEM(area);
+            }
+            MP_PLAT_FREE_HEAP(area);
+            next_area = NEXT_AREA(gc_inc_sw_prev_area);
+        } else {
+            gc_inc_sw_prev_area = area;
+            next_area = NEXT_AREA(area);
+        }
+        #else
+        next_area = NEXT_AREA(area);
+        #endif
+        gc_inc_sw_area = next_area;
+        #else
+        gc_inc_sw_area = NULL;
+        #endif
+        gc_inc_sw_block = 0;
+        gc_inc_sw_free_tail = 0;
+        gc_inc_sw_last_used = 0;
+    }
+    #if MICROPY_GC_USTIME_AVAILABLE
+    uint32_t dur = gc_inc_now_us() - t0;
+    gc_inc_stats[GC_INC_ST_WALK_US] += dur;
+    gc_inc_stats[GC_INC_ST_SWEEP_US] += dur;
+    if (dur > gc_inc_stats[GC_INC_ST_MAX_SWEEP_US]) {
+        gc_inc_stats[GC_INC_ST_MAX_SWEEP_US] = dur;
+    }
+    #endif
+    return gc_inc_sw_area == NULL;
+}
+
+// Sweep fully done: publish the new free-space state and adapt the trigger.
+static void gc_inc_sweep_done_locked(void) {
+    mp_gc_mark_active = GC_INC_PHASE_IDLE;
+    #if MICROPY_GC_SPLIT_HEAP
+    MP_STATE_MEM(gc_last_free_area) = &MP_STATE_MEM(area);
+    #endif
+    #if MICROPY_GC_ALLOC_THRESHOLD
+    // Adaptive trigger: next cycle starts once FACTOR times the blocks
+    // allocated during this window have been allocated again (clamped).
+    size_t amt = MP_STATE_MEM(gc_alloc_amount);
+    MP_STATE_MEM(gc_alloc_amount) = 0;
+    size_t thr = MICROPY_GC_INCR_TRIGGER_FACTOR * amt;
+    // Upper clamp, and it is not optional: the window that just ended usually
+    // ended *because the heap ran out*, so `amt` is roughly all the free space
+    // there was and FACTOR * amt exceeds the whole heap.  Without a ceiling the
+    // trigger ratchets past the heap size after the first collection and never
+    // fires again -- every later collection then comes from allocation failure,
+    // i.e. a fully synchronous stop-the-world cycle.  A cycle also has to
+    // *finish* inside the remaining free space, so cap on that.
+    // The ceiling must key off *free* space, not total heap: a cycle has to
+    // finish inside the space that is still available, so starting one after
+    // "heap/8" of allocation is far too late once the live set is large.
+    // gc_inc_sw_free is the block count this sweep just reclaimed//found free.
+    size_t ceiling = gc_inc_sw_free / MICROPY_GC_INCR_TRIGGER_DIVISOR;
+    if (thr > ceiling) {
+        thr = ceiling;
+    }
+    MP_STATE_MEM(gc_alloc_threshold) = MAX(thr, (size_t)MICROPY_GC_INCR_TRIGGER_MIN);
+    #endif
+}
+
+#ifndef GC_INC_VERIFY
+#define GC_INC_VERIFY (0)
+#endif
+#if GC_INC_VERIFY
+// Debug: after the final drain every live (AT_MARK) block must have been
+// scanned, so no word inside one may point at an unmarked (AT_HEAD) block.
+// Any hit is a store that reached a black object without a write barrier --
+// the pointed-to object is about to be swept while still referenced.
+// Best-effort: name the type of a heap block, for verifier output.  Object
+// types are static (never in the GC heap), so a word-0 pointer that lands
+// outside the heap and has an in-range qstr name is almost certainly a real
+// mp_obj_base_t.  Anything else prints as "?".
+static const char *gc_verify_typename(void *blk) {
+    mp_obj_base_t *o = (mp_obj_base_t *)blk;
+    const mp_obj_type_t *t = o->type;
+    if (t == NULL || ((uintptr_t)t & (sizeof(void *) - 1)) != 0) {
+        return "?";
+    }
+    if (gc_verify_ptr_get_area((const void *)t) != NULL) {
+        return "?"; // in the heap => not a static type
+    }
+    qstr n = t->name;
+    if (n == 0 || n >= QSTR_TOTAL()) {
+        return "?";
+    }
+    return qstr_str(n);
+}
+
+static void gc_inc_verify(void) {
+    size_t bad = 0;
+    for (mp_state_mem_area_t *area = &MP_STATE_MEM(area); area != NULL; area = NEXT_AREA(area)) {
+        for (size_t block = 0; block <= area->gc_last_used_block; block++) {
+            if (ATB_GET_KIND(area, block) != AT_MARK || (ATB_GET_KIND_FULL(area, block) & 4)) {
+                continue;
+            }
+            size_t nb = 0;
+            do {
+                nb += 1;
+            } while (ATB_GET_KIND(area, block + nb) == AT_TAIL);
+            void **ptrs = (void **)PTR_FROM_BLOCK(area, block);
+            for (size_t i = 0; i < nb * WORDS_PER_BLOCK; i++) {
+                void *p = ptrs[i];
+                mp_state_mem_area_t *pa = gc_verify_ptr_get_area(p);
+                if (pa && ATB_GET_KIND(pa, BLOCK_FROM_PTR(pa, p)) == AT_HEAD) {
+                    if (bad < 8) {
+                        printf("GC-VERIFY: live <%s> block %p word %d -> unmarked <%s> %p\n",
+                            gc_verify_typename((void *)PTR_FROM_BLOCK(area, block)),
+                            (void *)PTR_FROM_BLOCK(area, block), (int)i,
+                            gc_verify_typename(p), p);
+                    }
+                    bad += 1;
+                }
+            }
+            block += nb - 1;
+        }
+    }
+    if (bad) {
+        printf("GC-VERIFY: %d missed-barrier references\n", (int)bad);
+        fflush(stdout);
+        abort();
+    }
+}
+#endif
+
+// Marking has finished: final (atomic) root rescan, complete the drain, run
+// finalisers in one stop-the-world piece (classic semantics: __del__ sees the
+// pre-free heap), then arm the sliced sweep carried by later step() calls.
+static void gc_inc_finish_locked(void) {
+    #if MICROPY_GC_USTIME_AVAILABLE
+    uint32_t tf0 = (uint32_t)MICROPY_GC_PORT_USTIME();
+    #endif
+    gc_inc_scan_all_roots();
+    #if MICROPY_GC_USTIME_AVAILABLE
+    uint32_t td0 = gc_inc_now_us();
+    #endif
+    gc_inc_final_drain = true;
+    while (!gc_inc_drain(UINT32_MAX)) {
+        // drain may cut itself off at the per-slice time cap; in the
+        // synchronous finish we simply re-enter (state is resumable)
+    }
+    gc_inc_final_drain = false;
+    #if MICROPY_GC_USTIME_AVAILABLE
+    uint32_t td = gc_inc_now_us() - td0;
+    gc_inc_stats[GC_INC_ST_DRAIN_US] += td;
+    if (td > gc_inc_stats[GC_INC_ST_MAX_DRAIN_US]) {
+        gc_inc_stats[GC_INC_ST_MAX_DRAIN_US] = td;
+    }
+    #endif
+
+    #if GC_INC_VERIFY
+    gc_inc_verify();
+    #endif
+
+    // (caller wraps gc_collecting_flag; the lock flag here keeps finaliser
+    // code from re-entering a classic collect)
+    MP_STATE_THREAD(gc_lock_depth) |= GC_COLLECT_FLAG;
+    #if MICROPY_GC_USTIME_AVAILABLE
+    uint32_t tfm = gc_inc_now_us(); // end of final drain, start of finalisers
+    #endif
+    gc_sweep_run_finalisers();
+    MP_STATE_THREAD(gc_lock_depth) &= ~GC_COLLECT_FLAG;
+    #if MICROPY_PY_WEAKREF
+    gc_weakref_sweep();
+    #endif
+    #if MICROPY_GC_USTIME_AVAILABLE
+    uint32_t tf1 = gc_inc_now_us();
+    uint32_t dur = tf1 - tf0;                    // roots + final drain + finalisers
+    gc_inc_stats[GC_INC_ST_SWEEP_US] += dur;     // all part of the STW pieces
+    gc_inc_stats[GC_INC_ST_FIN_US] += tf1 - tfm; // finalisers only
+    (void)dur; // max_sweep_us now means "longest sweep slice" only; the finish
+               // block is attributed to roots_us / drain_us / fin_us instead
+    #endif
+
+    // Arm the sliced sweep.  Start with the allocation cursor pinned to the
+    // first area: the walk below may free other areas between slices, and
+    // mutators (allocations) run in those gaps.
+    MP_STATE_MEM(gc_last_free_area) = &MP_STATE_MEM(area);
+    gc_inc_sw_area = &MP_STATE_MEM(area);
+    gc_inc_sw_block = 0;
+    gc_inc_sw_free_tail = 0;
+    gc_inc_sw_last_used = 0;
+    gc_inc_sw_free = 0;
+    #if MICROPY_GC_SPLIT_HEAP_AUTO
+    gc_inc_sw_prev_area = NULL;
+    #endif
+    mp_gc_mark_active = GC_INC_PHASE_SWEEP;
+}
+
+void gc_incremental_start(void) {
+    gc_inc_stats[GC_INC_ST_START_CALLS] += 1;
+    if (mp_gc_mark_active != 0 || !gc_inc_enabled) {
+        gc_inc_stats[GC_INC_ST_START_BUSY] += 1;
+        return;
+    }
+    GC_ENTER();
+    gc_inc_in_step = true; // root scan must not be re-entered by a step
+    gc_inc_stats[GC_INC_ST_CYCLES] += 1;
+    gc_inc_gray_sp = 0;
+    gc_inc_walk_pending = false;
+    gc_inc_walk_area = NULL;
+    gc_inc_walk_block = 0;
+    MP_STATE_MEM(gc_stack_overflow) = 0;
+    mp_gc_mark_active = 1;
+    gc_inc_scan_all_roots();
+    // Do only ONE slice of marking here.  If that finished the job (tiny live
+    // set / empty gray set), complete now; otherwise the remaining work is
+    // carried by subsequent gc_alloc() calls via gc_incremental_step().
+    // (Draining with an unbounded budget here would make every cycle a
+    // synchronous stop-the-world collection, defeating the whole point.)
+    if (gc_inc_drain(gc_inc_slice_words)) {
+        gc_inc_stats[GC_INC_ST_SLICE_ENDS] += 1;
+        gc_inc_in_step = false;
+        gc_collecting_flag = true; // finalisers are stop-the-world
+        gc_inc_finish_locked();
+        gc_collecting_flag = false;
+    } else {
+        gc_inc_stats[GC_INC_ST_SLICES] += 1;
+    }
+    #if MICROPY_GC_USTIME_AVAILABLE
+    gc_inc_next_slice_us = gc_inc_now_us() + gc_inc_gap_us;
+    #endif
+    gc_inc_in_step = false;
+    GC_EXIT();
+}
+
+static void gc_inc_step_inner(bool desperate) {
+    uint8_t phase = mp_gc_mark_active;
+    if (phase == GC_INC_PHASE_IDLE || gc_inc_in_step) {
+        return;
+    }
+    gc_inc_in_step = true;
+    if (phase == GC_INC_PHASE_MARK) {
+        // A microsecond-clock read per allocation would tax gc_alloc too
+        // much, so callers only invoke the step every few allocations;
+        // when they do, still honour the wall-clock gap.  desperate=1 (an
+        // allocation is about to fail) bypasses the gap: free memory now.
+        if (!desperate && !gc_inc_due()) {
+            gc_inc_stats[GC_INC_ST_STEP_NOTDUE] += 1;
+            gc_inc_in_step = false;
+            return; // pace: not enough wall-clock time since last slice
+        }
+        #if MICROPY_GC_USTIME_AVAILABLE
+        uint32_t ts0 = gc_inc_now_us();
+        #endif
+        bool mark_done = gc_inc_drain(desperate ? UINT32_MAX : gc_inc_slice_words);
+        #if MICROPY_GC_USTIME_AVAILABLE
+        uint32_t ts = gc_inc_now_us() - ts0;
+        gc_inc_stats[GC_INC_ST_MARK_US] += ts;
+        if (ts > gc_inc_stats[GC_INC_ST_MAX_SLICE_US]) {
+            gc_inc_stats[GC_INC_ST_MAX_SLICE_US] = ts;
+        }
+        #endif
+        if (mark_done) {
+            gc_inc_stats[GC_INC_ST_SLICE_ENDS] += 1;
+            gc_inc_in_step = false;
+            gc_collecting_flag = true; // finalisers are stop-the-world
+            gc_inc_finish_locked();
+            gc_collecting_flag = false;
+        } else {
+            gc_inc_stats[GC_INC_ST_SLICES] += 1;
+        }
+        gc_inc_next_slice_us = gc_inc_now_us() + gc_inc_gap_us;
+    } else { // GC_INC_PHASE_SWEEP: sliced, not flagged as "interpreter stalled"
+        if (!desperate && !gc_inc_due()) {
+            gc_inc_in_step = false;
+            return;
+        }
+        gc_inc_sweep_step(desperate ? UINT32_MAX : MICROPY_GC_INCR_SWEEP_SLICE_BLOCKS);
+        if (mp_gc_mark_active == GC_INC_PHASE_SWEEP && gc_inc_sw_area == NULL) {
+            gc_inc_sweep_done_locked();
+        }
+        gc_inc_next_slice_us = gc_inc_now_us() + gc_inc_gap_us;
+    }
+    gc_inc_in_step = false;
+}
+
+void gc_incremental_step(bool desperate) {
+    gc_inc_stats[GC_INC_ST_STEP_CALLS] += 1;
+    if (mp_gc_mark_active == GC_INC_PHASE_IDLE || gc_inc_in_step) {
+        gc_inc_stats[GC_INC_ST_STEP_IDLE] += 1;
+        return;
+    }
+    // Recursive lock: no-op when we already hold it via gc_alloc, but when
+    // entered from other paths (allocation failure handling) it excludes
+    // allocators that do not take the GIL (bare C tasks) from ATB updates
+    // racing our mark/sweep slices.  The classic collector holds this mutex
+    // across the whole cycle for exactly this reason.
+    GC_ENTER();
+    gc_inc_step_inner(desperate);
+    GC_EXIT();
+}
+
+void gc_incremental_complete(void) {
+    if (mp_gc_mark_active == GC_INC_PHASE_IDLE || gc_inc_in_step) {
+        return;
+    }
+    gc_inc_in_step = true;
+    gc_inc_stats[GC_INC_ST_SYNC_ENDS] += 1;
+    gc_collecting_flag = true; // whole synchronous run is a stall for the port
+    GC_ENTER(); // exclude non-GIL allocators from the whole sync run
+    // Run whatever phases remain straight through (used on allocation
+    // failure, gc.collect() and soft-reset; each transition terminates).
+    while (mp_gc_mark_active != GC_INC_PHASE_IDLE) {
+        if (mp_gc_mark_active == GC_INC_PHASE_MARK) {
+            while (!gc_inc_drain(gc_inc_slice_words)) {
+                // keep draining past the per-slice cap (no gap wait here:
+                // this whole function is already a stop-the-world run)
+            }
+            gc_inc_finish_locked();
+        } else { // GC_INC_PHASE_SWEEP
+            do {
+                gc_inc_sweep_step(MICROPY_GC_INCR_SWEEP_SLICE_BLOCKS * 4);
+            } while (gc_inc_sw_area != NULL);
+            gc_inc_sweep_done_locked();
+        }
+    }
+    gc_collecting_flag = false;
+    GC_EXIT();
+    gc_inc_in_step = false;
+}
+
+void gc_incremental_abort(void) {
+    if (mp_gc_mark_active == 0) {
+        return;
+    }
+    gc_inc_stats[GC_INC_ST_ABORTS] += 1;
+    mp_gc_mark_active = 0;
+    gc_inc_gray_sp = 0;
+    gc_inc_in_step = false;
+    gc_inc_walk_pending = false;
+    gc_inc_walk_area = NULL;
+    gc_inc_sw_area = NULL;
+    gc_inc_sw_block = 0;
+    // Turn all partial marks back into heads so the subsequent sweep_all
+    // really frees everything.
+    for (mp_state_mem_area_t *area = &MP_STATE_MEM(area); area != NULL; area = NEXT_AREA(area)) {
+        for (size_t block = 0; block <= area->gc_last_used_block; block++) {
+            if (ATB_GET_KIND(area, block) == AT_MARK) {
+                ATB_MARK_TO_HEAD(area, block);
+            }
+            area->gc_alloc_table_start[block >> 1] &= ~(8 << BLOCK_SHIFT(block));
+        }
+    }
+}
+#endif // MICROPY_GC_INCREMENTAL
 
 // Address sanitizer needs to know that the access to ptrs[i] must always be
 // considered OK, even if it's a load from an address that would normally be
@@ -854,13 +1888,12 @@ void gc_info(gc_info_t *info) {
 void gc_info_fast(gc_info_t *info) {
     GC_ENTER();
     memset(info, 0, sizeof(*info));
-    const uint8_t lut[16] = {2, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0};
     for (mp_state_mem_area_t *area = &MP_STATE_MEM(area); area != NULL; area = NEXT_AREA(area)) {
         size_t free_blocks = 0;
         info->total += area->gc_pool_end - area->gc_pool_start;
         for (size_t i = 0; i < area->gc_alloc_table_byte_len; i++) {
             uint8_t atb = area->gc_alloc_table_start[i];
-            free_blocks += lut[atb & 0xF] + lut[atb >> 4];
+            free_blocks += ((atb & 0xF) == AT_FREE) + ((atb >> 4) == AT_FREE);
         }
         info->free += free_blocks;
     }
@@ -892,7 +1925,9 @@ void *gc_alloc(size_t n_bytes, unsigned int alloc_flags) {
     bool has_finaliser = alloc_flags & GC_ALLOC_FLAG_HAS_FINALISER;
     size_t n_blocks = ((n_bytes + BYTES_PER_BLOCK - 1) & (~(BYTES_PER_BLOCK - 1))) / BYTES_PER_BLOCK;
     DEBUG_printf("gc_alloc(" UINT_FMT " bytes -> " UINT_FMT " blocks)\n", n_bytes, n_blocks);
-
+    //if(alloc_flags & GC_ALLOC_FLAG_IS_DATA){
+    //  printf("alloc_data %d\n", n_bytes);
+    //}
     // check for 0 allocation
     if (n_blocks == 0) {
         return NULL;
@@ -904,6 +1939,25 @@ void *gc_alloc(size_t n_bytes, unsigned int alloc_flags) {
     }
 
     GC_ENTER();
+
+    #if MICROPY_GC_INCREMENTAL
+    // Advance any in-progress incremental cycle by one bounded slice.
+    // Sampled 1-in-8 allocations: the due-check's clock read would otherwise
+    // add ~50% to gc_alloc's own cost for allocation-bound code.  Allocation
+    // failures take the gc_collect() path below which completes the cycle,
+    // so pressure is never deferred by this sampling.
+    if ((++gc_inc_alloc_ctr & 7) == 0) {
+        gc_incremental_step(false);
+    }
+    #endif
+
+    #if MICROPY_GC_INCREMENTAL && MICROPY_GC_USTIME_AVAILABLE
+    // Per-call stall accounting: the loop below can run the collector many
+    // times for one allocation, and that sum is the number a frame feels.
+    bool gc_stall_timed = false;
+    uint32_t gc_stall_t0 = 0;
+    uint32_t gc_stall_retries = 0;
+    #endif
 
     mp_state_mem_area_t *area;
     size_t i;
@@ -917,32 +1971,57 @@ void *gc_alloc(size_t n_bytes, unsigned int alloc_flags) {
 
     #if MICROPY_GC_ALLOC_THRESHOLD
     if (!collected && MP_STATE_MEM(gc_alloc_amount) >= MP_STATE_MEM(gc_alloc_threshold)) {
-        GC_EXIT();
-        gc_collect();
-        collected = 1;
-        GC_ENTER();
+        #if MICROPY_GC_INCREMENTAL
+        gc_inc_stats[GC_INC_ST_THRESH_HITS] += 1;
+        #endif
+        #if MICROPY_GC_INCREMENTAL
+        if (gc_incremental_enabled()) {
+            // Start a cycle ahead of pressure; it will complete in slices.
+            // Allocation continues optimistically; on failure the cycle is
+            // completed synchronously by the collect below.
+            gc_incremental_start();
+        } else
+        #endif
+        {
+            GC_EXIT();
+            gc_collect();
+            collected = 1;
+            GC_ENTER();
+        }
     }
     #endif
 
     for (;;) {
-
         #if MICROPY_GC_SPLIT_HEAP
         area = MP_STATE_MEM(gc_last_free_area);
         #else
         area = &MP_STATE_MEM(area);
         #endif
+        //static int last_started_atb_index = 0;
+        //if(last_started_atb_index > area->gc_last_free_atb_index){
+        //  printf("atb index looped\n");
+        //}
+        //last_started_atb_index = area->gc_last_free_atb_index;
 
         // look for a run of n_blocks available blocks
         for (; area != NULL; area = NEXT_AREA(area), i = 0) {
             n_free = 0;
+            //printf("heap len=%d, s=%d \n", area->gc_alloc_table_byte_len, area->gc_last_free_atb_index);
             for (i = area->gc_last_free_atb_index; i < area->gc_alloc_table_byte_len; i++) {
+              //for (int ct = 0; ct < area->gc_alloc_table_byte_len; ct++) {
+              //i = ct + area->gc_last_free_atb_index;
+              //if(i >= area->gc_alloc_table_byte_len) i-= area->gc_alloc_table_byte_len;
                 MICROPY_GC_HOOK_LOOP(i);
                 byte a = area->gc_alloc_table_start[i];
                 // *FORMAT-OFF*
-                if (ATB_0_IS_FREE(a)) { if (++n_free >= n_blocks) { i = i * BLOCKS_PER_ATB + 0; goto found; } } else { n_free = 0; }
-                if (ATB_1_IS_FREE(a)) { if (++n_free >= n_blocks) { i = i * BLOCKS_PER_ATB + 1; goto found; } } else { n_free = 0; }
-                if (ATB_2_IS_FREE(a)) { if (++n_free >= n_blocks) { i = i * BLOCKS_PER_ATB + 2; goto found; } } else { n_free = 0; }
-                if (ATB_3_IS_FREE(a)) { if (++n_free >= n_blocks) { i = i * BLOCKS_PER_ATB + 3; goto found; } } else { n_free = 0; }
+                //if (ATB_0_IS_FREE(a)) { if (++n_free >= n_blocks) { i = i * BLOCKS_PER_ATB + 0; goto found; } } else { n_free = 0; }
+                //if (ATB_1_IS_FREE(a)) { if (++n_free >= n_blocks) { i = i * BLOCKS_PER_ATB + 1; goto found; } } else { n_free = 0; }
+                //if (ATB_2_IS_FREE(a)) { if (++n_free >= n_blocks) { i = i * BLOCKS_PER_ATB + 2; goto found; } } else { n_free = 0; }
+                //if (ATB_3_IS_FREE(a)) { if (++n_free >= n_blocks) { i = i * BLOCKS_PER_ATB + 3; goto found; } } else { n_free = 0; }
+                if (ATB_0_IS_FREE(a)) { if (++n_free >= n_blocks) { i = (i<<1) + 0; goto found; } } else { n_free = 0; }
+                if (ATB_1_IS_FREE(a)) { if (++n_free >= n_blocks) { i = (i<<1) + 1; goto found; } } else { n_free = 0; }
+                //if (ATB_2_IS_FREE(a)) { if (++n_free >= n_blocks) { i = (i<<2) + 2; goto found; } } else { n_free = 0; }
+                //if (ATB_3_IS_FREE(a)) { if (++n_free >= n_blocks) { i = (i<<2)+ 3; goto found; } } else { n_free = 0; }
                 // *FORMAT-ON*
             }
 
@@ -968,6 +2047,42 @@ void *gc_alloc(size_t n_bytes, unsigned int alloc_flags) {
             return NULL;
         }
         DEBUG_printf("gc_alloc(" UINT_FMT "): no free mem, triggering GC\n", n_bytes);
+        #if MICROPY_GC_INCREMENTAL
+        gc_inc_stats[GC_INC_ST_OOM] += 1;
+        #if MICROPY_GC_USTIME_AVAILABLE
+        if (!gc_stall_timed) {
+            gc_stall_timed = true;
+            gc_stall_t0 = gc_inc_now_us();
+        }
+        gc_stall_retries += 1;
+        #endif
+        #endif
+        #if MICROPY_GC_INCREMENTAL
+        if (!gc_inc_in_step) {
+            if (mp_gc_mark_active == GC_INC_PHASE_MARK) {
+                // Nothing can be freed until marking is over, finalisers ran
+                // and the sweep is armed: finish marking now (capped slices,
+                // terminates) and fall through to the sweep treatment.
+                while (mp_gc_mark_active == GC_INC_PHASE_MARK) {
+                    gc_incremental_step(true);
+                }
+            }
+            if (mp_gc_mark_active == GC_INC_PHASE_SWEEP) {
+                // The sweep frees progressively: advance one (capped, larger)
+                // slice of the table walk and retry the allocation instead of
+                // forcing the whole cycle synchronous -- a big request gets
+                // its memory as soon as the walk has freed enough of it.
+                GC_ENTER(); // see gc_incremental_step(): lock ATB updates
+                gc_inc_sweep_step(MICROPY_GC_INCR_SWEEP_SLICE_BLOCKS * 8);
+                if (gc_inc_sw_area == NULL) {
+                    gc_inc_sweep_done_locked();
+                }
+                GC_EXIT();
+                GC_ENTER();
+                continue; // retry scan; cycle not yet counted as "collected"
+            }
+        }
+        #endif
         gc_collect();
         collected = 1;
         GC_ENTER();
@@ -975,6 +2090,19 @@ void *gc_alloc(size_t n_bytes, unsigned int alloc_flags) {
 
     // found, ending at block i inclusive
 found:
+    #if MICROPY_GC_INCREMENTAL && MICROPY_GC_USTIME_AVAILABLE
+    if (gc_stall_timed) {
+        uint32_t dur = gc_inc_now_us() - gc_stall_t0;
+        gc_inc_stats[GC_INC_ST_ALLOC_STALL_US] += dur;
+        if (dur > gc_inc_stats[GC_INC_ST_MAX_ALLOC_US]) {
+            gc_inc_stats[GC_INC_ST_MAX_ALLOC_US] = dur;
+        }
+        if (gc_stall_retries > gc_inc_stats[GC_INC_ST_MAX_RETRIES]) {
+            gc_inc_stats[GC_INC_ST_MAX_RETRIES] = gc_stall_retries;
+        }
+    }
+    #endif
+
     // get starting and end blocks, both inclusive
     end_block = i;
     start_block = i - n_free + 1;
@@ -985,16 +2113,21 @@ found:
     // before this one.  Also, whenever we free or shink a block we must check
     // if this index needs adjusting (see gc_realloc and gc_free).
     if (n_free == 1) {
-        #if MICROPY_GC_SPLIT_HEAP
-        MP_STATE_MEM(gc_last_free_area) = area;
-        #endif
-        area->gc_last_free_atb_index = (i + 1) / BLOCKS_PER_ATB;
+      #if MICROPY_GC_SPLIT_HEAP
+      MP_STATE_MEM(gc_last_free_area) = area;
+      #endif
+      area->gc_last_free_atb_index = (i + 1) / BLOCKS_PER_ATB;
     }
 
     area->gc_last_used_block = MAX(area->gc_last_used_block, end_block);
 
     // mark first block as used head
-    ATB_FREE_TO_HEAD(area, start_block);
+    if((alloc_flags & GC_ALLOC_FLAG_IS_DATA)){// || n_blocks >= 300){
+      ATB_FREE_TO_HEAD_DATA(area, start_block);
+      //printf("HEAD_DATA set\n");
+    }else{
+      ATB_FREE_TO_HEAD(area, start_block);
+    }
 
     // mark rest of blocks as used tail
     // TODO for a run of many blocks can make this more efficient
@@ -1002,10 +2135,40 @@ found:
         ATB_FREE_TO_TAIL(area, bl);
     }
 
+    #if MICROPY_GC_INCREMENTAL
+    if (mp_gc_mark_active == GC_INC_PHASE_SWEEP) {
+        // "born during sweep" tag (ATB top bit): the sliced sweep must treat
+        // this block as live, and must break any free_tail chain here so a
+        // garbage chain behind it cannot swallow our new tail blocks.
+        // NOTE: heads allocated with GC_ALLOC_FLAG_IS_DATA use the identical
+        // nibble (the fork's unused AT_HEAD_DATA_CANDIDATE==9); treating them
+        // as sweep-live is conservative (freed next cycle), never unsafe.
+        area->gc_alloc_table_start[start_block >> 1] |= (8 << BLOCK_SHIFT(start_block));
+    } else if (mp_gc_mark_active == GC_INC_PHASE_MARK) {
+        // Allocate gray.  A block born during MARK is reachable at the final
+        // root rescan only if some *re-scanned* object still points at it, but
+        // a store into an already-black container is invisible to that rescan
+        // (a black object is never scanned twice).  Leaving it white therefore
+        // sweeps live memory whenever a long-lived heap struct has a pointer
+        // field reassigned mid-cycle: m_renew of vstr->buf inside the black
+        // mp_lexer_t is the canonical case, and it corrupts token text.
+        //
+        // Gray, not black: marking alone would keep this block alive but leave
+        // it never scanned, so a *pre-existing* white object stored into it
+        // right after allocation would be collected instead -- trading one
+        // missed-barrier class for a worse one.  Queuing it gray guarantees it
+        // is scanned at least once after its fields are filled.  Cost is one
+        // cycle of floating garbage, the same trade the "born during sweep"
+        // tag above already makes, plus some gray-set traffic; on overflow the
+        // existing resolver walk re-derives it from the gray bit.
+        gc_inc_mark_gray(area, start_block);
+    }
+    #endif
+
     // get pointer to first block
     // we must create this pointer before unlocking the GC so a collection can find it
     void *ret_ptr = (void *)(area->gc_pool_start + start_block * BYTES_PER_BLOCK);
-    DEBUG_printf("gc_alloc(%p)\n", ret_ptr);
+    //printf("gc_alloc(%p, %d)\n", ret_ptr, start_block / BLOCKS_PER_ATB);
 
     #if MICROPY_GC_ALLOC_THRESHOLD
     MP_STATE_MEM(gc_alloc_amount) += n_blocks;
@@ -1079,10 +2242,11 @@ void gc_free(void *ptr) {
     #endif
 
     size_t block = BLOCK_FROM_PTR(area, ptr);
-    assert(ATB_GET_KIND(area, block) == AT_HEAD
-        || (ATB_GET_KIND(area, block) == AT_MARK && (MP_STATE_THREAD(gc_lock_depth) & GC_COLLECT_FLAG)));
 
     #if MICROPY_ENABLE_FINALISER
+    // Clear the finaliser bit before the deferral below: the caller has
+    // explicitly freed this object, so its finaliser must not run later even
+    // if the physical free is postponed to the sweep.
     FTB_CLEAR(area, block);
     #endif
 
@@ -1090,6 +2254,24 @@ void gc_free(void *ptr) {
     // Objects that have a weak reference should not be explicitly freed.
     assert(!WTB_GET(area, block));
     #endif
+
+    #if MICROPY_GC_INCREMENTAL
+    // An incremental cycle marks live objects while the mutator keeps running,
+    // so an explicit free can land on a block that is currently AT_MARK (and
+    // possibly still queued in the gray set).  Freeing it here would let the
+    // block be reallocated under the queued entry, and a later drain would
+    // then scan unrelated memory.  Leave it to the collector: the sweep
+    // demotes it to AT_HEAD and the next cycle reclaims it.
+    if (mp_gc_mark_active != GC_INC_PHASE_IDLE
+        && ATB_GET_KIND(area, block) == AT_MARK
+        && !(MP_STATE_THREAD(gc_lock_depth) & GC_COLLECT_FLAG)) {
+        GC_EXIT();
+        return;
+    }
+    #endif
+
+    assert(ATB_GET_KIND(area, block) == AT_HEAD
+        || (ATB_GET_KIND(area, block) == AT_MARK && (MP_STATE_THREAD(gc_lock_depth) & GC_COLLECT_FLAG)));
 
     #if MICROPY_GC_SPLIT_HEAP
     if (MP_STATE_MEM(gc_last_free_area) != area) {
@@ -1155,11 +2337,10 @@ size_t gc_nbytes(const void *ptr) {
     GC_EXIT();
     return 0;
 }
-
-void *gc_realloc(void *ptr_in, size_t n_bytes, bool allow_move) {
+void *gc_realloc_flags(void *ptr_in, size_t n_bytes, bool allow_move, unsigned int flag) {
     // check for pure allocation
     if (ptr_in == NULL) {
-        return gc_alloc(n_bytes, false);
+        return gc_alloc(n_bytes, flag);
     }
 
     // check for pure free
@@ -1186,7 +2367,18 @@ void *gc_realloc(void *ptr_in, size_t n_bytes, bool allow_move) {
     area = &MP_STATE_MEM(area);
     #endif
     size_t block = BLOCK_FROM_PTR(area, ptr);
+    unsigned int ex_flags =0;
+    if(ATB_GET_KIND_FULL(area,block)&0x4){
+      ex_flags |= GC_ALLOC_FLAG_IS_DATA;
+    }
+    #if MICROPY_GC_INCREMENTAL
+    // During an incremental cycle a live block is AT_MARK; realloc never
+    // touches the head nibble, so all paths below stay correct.
+    assert(ATB_GET_KIND(area, block) == AT_HEAD
+        || (mp_gc_mark_active != GC_INC_PHASE_IDLE && ATB_GET_KIND(area, block) == AT_MARK));
+    #else
     assert(ATB_GET_KIND(area, block) == AT_HEAD);
+    #endif
 
     // compute number of new blocks that are requested
     size_t new_blocks = (n_bytes + BYTES_PER_BLOCK - 1) / BYTES_PER_BLOCK;
@@ -1239,7 +2431,7 @@ void *gc_realloc(void *ptr_in, size_t n_bytes, bool allow_move) {
 
         // set the last_free pointer to end of this block if it's earlier in the heap
         if ((block + new_blocks) / BLOCKS_PER_ATB < area->gc_last_free_atb_index) {
-            area->gc_last_free_atb_index = (block + new_blocks) / BLOCKS_PER_ATB;
+          area->gc_last_free_atb_index = (block + new_blocks) / BLOCKS_PER_ATB;
         }
 
         GC_EXIT();
@@ -1258,9 +2450,22 @@ void *gc_realloc(void *ptr_in, size_t n_bytes, bool allow_move) {
         for (size_t bl = block + n_blocks; bl < end_block; bl++) {
             assert(ATB_GET_KIND(area, bl) == AT_FREE);
             ATB_FREE_TO_TAIL(area, bl);
+            #if MICROPY_GC_INCREMENTAL
+            if (mp_gc_mark_active == GC_INC_PHASE_SWEEP) {
+                // grown tail: protect from a free_tail chain in sliced sweep
+                area->gc_alloc_table_start[bl >> 1] |= (8 << BLOCK_SHIFT(bl));
+            }
+            #endif
         }
 
         area->gc_last_used_block = MAX(area->gc_last_used_block, end_block);
+
+        #if MICROPY_GC_INCREMENTAL
+        // Keep the gray set consistent with the now-longer chain: if this
+        // object was already marked (possibly already scanned) during an
+        // active cycle, requeue it so the new tail slots get rescanned.
+        GC_GRAY_MARK_PTR(ptr_in);
+        #endif
 
         GC_EXIT();
 
@@ -1293,7 +2498,7 @@ void *gc_realloc(void *ptr_in, size_t n_bytes, bool allow_move) {
     }
 
     // can't resize inplace; try to find a new contiguous chain
-    void *ptr_out = gc_alloc(n_bytes, ftb_state);
+    void *ptr_out = gc_alloc(n_bytes, ftb_state | ex_flags);
 
     // check that the alloc succeeded
     if (ptr_out == NULL) {
@@ -1302,9 +2507,25 @@ void *gc_realloc(void *ptr_in, size_t n_bytes, bool allow_move) {
 
     DEBUG_printf("gc_realloc(%p -> %p)\n", ptr_in, ptr_out);
     memcpy(ptr_out, ptr_in, n_blocks * BYTES_PER_BLOCK);
+    #if MICROPY_GC_INCREMENTAL
+    // The new buffer holds (pointer) contents copied from a live object; if a
+    // cycle is active the buffer must be live for this cycle too, and it will
+    // be rescanned once the caller has updated its container's pointer field
+    // (no allocation happens in between, so no slice can run mid-update).
+    GC_GRAY_MARK_PTR(ptr_out);
+    #endif
     gc_free(ptr_in);
     return ptr_out;
 }
+
+void *gc_realloc(void *ptr_in, size_t n_bytes, bool allow_move) {
+  return gc_realloc_flags(ptr_in, n_bytes, allow_move, false);
+}
+void *gc_realloc_data(void *ptr_in, size_t n_bytes, bool allow_move) {
+  return gc_realloc_flags(ptr_in, n_bytes, allow_move,GC_ALLOC_FLAG_IS_DATA );
+}
+
+
 
 void gc_dump_info(const mp_print_t *print) {
     gc_info_t info;
@@ -1338,7 +2559,7 @@ void gc_dump_alloc_table(const mp_print_t *print) {
                     }
                     if (bl2 - bl >= 2 * DUMP_BYTES_PER_LINE) {
                         // there are at least 2 lines containing only free blocks, so abbreviate their printing
-                        mp_printf(print, "\n       (%u lines all free)", (uint)((bl2 - bl) / DUMP_BYTES_PER_LINE));
+                        mp_printf(print, "\n       (%u lines all free)", (uint)(bl2 - bl) / DUMP_BYTES_PER_LINE);
                         bl = bl2 & (~(DUMP_BYTES_PER_LINE - 1));
                         if (bl >= area->gc_alloc_table_byte_len * BLOCKS_PER_ATB) {
                             // got to end of heap
@@ -1381,7 +2602,7 @@ void gc_dump_alloc_table(const mp_print_t *print) {
                     break;
                 }
                 */
-                /* this prints the MicroPython object type of the head block */
+                /* this prints the uPy object type of the head block */
                 case AT_HEAD: {
                     void **ptr = (void **)(area->gc_pool_start + bl * BYTES_PER_BLOCK);
                     if (*ptr == &mp_type_tuple) {

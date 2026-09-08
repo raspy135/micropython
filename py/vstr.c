@@ -44,7 +44,7 @@ void vstr_init(vstr_t *vstr, size_t alloc) {
     }
     vstr->alloc = alloc;
     vstr->len = 0;
-    vstr->buf = m_new(char, vstr->alloc);
+    vstr->buf = m_new_data(char, vstr->alloc);
     vstr->fixed_buf = false;
 }
 
@@ -76,6 +76,10 @@ void vstr_clear(vstr_t *vstr) {
 }
 
 vstr_t *vstr_new(size_t alloc) {
+    // NOT m_new_obj_data: vstr_t holds a char *buf, and an IS_DATA block is
+    // never scanned for pointers, so the buffer would be invisible to the GC
+    // and collected while still live.  Only the buffer itself (raw chars) is
+    // legitimately IS_DATA -- see vstr_init.
     vstr_t *vstr = m_new_obj(vstr_t);
     vstr_init(vstr, alloc);
     return vstr;

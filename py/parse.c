@@ -850,7 +850,7 @@ static bool fold_constants(parser_t *parser, uint8_t rule_id, size_t num_args) {
                     // store the value in the table of dynamic constants
                     mp_map_elem_t *elem = mp_map_lookup(&parser->consts, MP_OBJ_NEW_QSTR(id), MP_MAP_LOOKUP_ADD_IF_NOT_FOUND);
                     assert(elem->value == MP_OBJ_NULL);
-                    elem->value = value;
+                    mp_map_set_value(elem, value);
 
                     // If the constant starts with an underscore then treat it as a private
                     // variable and don't emit any code to store the value to the id.

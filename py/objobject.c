@@ -72,7 +72,7 @@ static mp_obj_t object___setattr__(mp_obj_t self_in, mp_obj_t attr, mp_obj_t val
     }
 
     mp_obj_instance_t *self = MP_OBJ_TO_PTR(self_in);
-    mp_map_lookup(&self->members, attr, MP_MAP_LOOKUP_ADD_IF_NOT_FOUND)->value = value;
+    mp_map_set_value(mp_map_lookup(&self->members, attr, MP_MAP_LOOKUP_ADD_IF_NOT_FOUND), value);
     return mp_const_none;
 }
 static MP_DEFINE_CONST_FUN_OBJ_3(object___setattr___obj, object___setattr__);

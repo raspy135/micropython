@@ -242,3 +242,34 @@ static inline unsigned long mp_random_seed_init(void) {
 #ifndef MICROPY_PY_BLUETOOTH_ENABLE_L2CAP_CHANNELS
 #define MICROPY_PY_BLUETOOTH_ENABLE_L2CAP_CHANNELS (MICROPY_BLUETOOTH_NIMBLE)
 #endif
+
+// Host test build: exercise the incremental GC with real microsecond timing.
+#ifndef MICROPY_GC_INCREMENTAL
+#define MICROPY_GC_INCREMENTAL (1)
+#endif
+#define MICROPY_GC_USTIME_AVAILABLE (1)
+unsigned long mp_hal_ticks_us(void);
+#define MICROPY_GC_PORT_USTIME() ((uint32_t)mp_hal_ticks_us())
+
+// Mirror the pocketdeck esp32 GC configuration so host tests exercise the
+// same code paths: split heap, dynamic areas, compaction, gc_last_free_area.
+// (The fork's py/gc.c assumes SPLIT_HEAP throughout.)
+#define MICROPY_GC_SPLIT_HEAP (1)
+#define MICROPY_GC_SPLIT_HEAP_AUTO (1)
+#define MICROPY_GC_MAX_NEW_AREA_SIZE (256 * 1024)
+// Ceiling on the total grown heap, enforced by gc_get_max_new_split().
+#define MICROPY_GC_TOTAL_HEAP_LIMIT (8 * 1024 * 1024)
+#define MICROPY_GC_ALLOC_THRESHOLD (1)
+
+#if MICROPY_GC_INCREMENTAL
+// Root scan of all thread stacks, implemented in gccollect.c, called by the
+// incremental collector at cycle start and (atomically) at cycle end.
+void mp_port_gc_stack_roots(void);
+#define MICROPY_GC_PORT_STACK_ROOTS()       mp_port_gc_stack_roots()
+// The incremental cycle state machine assumes GIL-serialised mutators (same
+// as the esp32 port); force GIL mode on for incremental test builds.
+#ifdef MICROPY_PY_THREAD_GIL
+#undef MICROPY_PY_THREAD_GIL
+#endif
+#define MICROPY_PY_THREAD_GIL               (1)
+#endif

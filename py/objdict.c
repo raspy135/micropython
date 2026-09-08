@@ -303,7 +303,8 @@ static mp_obj_t dict_fromkeys(size_t n_args, const mp_obj_t *args) {
     }
     #endif
     while ((next = mp_iternext(iter)) != MP_OBJ_STOP_ITERATION) {
-        mp_map_lookup(&self->map, next, MP_MAP_LOOKUP_ADD_IF_NOT_FOUND)->value = value;
+        mp_map_elem_t *slot = mp_map_lookup(&self->map, next, MP_MAP_LOOKUP_ADD_IF_NOT_FOUND);
+        mp_map_set_value(slot, value);
     }
 
     return self_out;
@@ -331,7 +332,7 @@ static mp_obj_t dict_get_helper(size_t n_args, const mp_obj_t *args, mp_map_look
             value = args[2];
         }
         if (lookup_kind == MP_MAP_LOOKUP_ADD_IF_NOT_FOUND) {
-            elem->value = value;
+            mp_map_set_value(elem, value);
         }
     } else {
         value = elem->value;
@@ -398,7 +399,8 @@ static mp_obj_t dict_update(size_t n_args, const mp_obj_t *args, mp_map_t *kwarg
                 size_t cur = 0;
                 mp_map_elem_t *elem = NULL;
                 while ((elem = dict_iter_next((mp_obj_dict_t *)MP_OBJ_TO_PTR(args[1]), &cur)) != NULL) {
-                    mp_map_lookup(&self->map, elem->key, MP_MAP_LOOKUP_ADD_IF_NOT_FOUND)->value = elem->value;
+                    mp_map_elem_t *slot = mp_map_lookup(&self->map, elem->key, MP_MAP_LOOKUP_ADD_IF_NOT_FOUND);
+                    mp_map_set_value(slot, elem->value);
                 }
             }
         } else {
@@ -415,7 +417,8 @@ static mp_obj_t dict_update(size_t n_args, const mp_obj_t *args, mp_map_t *kwarg
                     || stop != MP_OBJ_STOP_ITERATION) {
                     mp_raise_ValueError(MP_ERROR_TEXT("dict update sequence has wrong length"));
                 } else {
-                    mp_map_lookup(&self->map, key, MP_MAP_LOOKUP_ADD_IF_NOT_FOUND)->value = value;
+                    mp_map_elem_t *slot = mp_map_lookup(&self->map, key, MP_MAP_LOOKUP_ADD_IF_NOT_FOUND);
+                    mp_map_set_value(slot, value);
                 }
             }
         }
@@ -424,7 +427,8 @@ static mp_obj_t dict_update(size_t n_args, const mp_obj_t *args, mp_map_t *kwarg
     // update the dict with any keyword args
     for (size_t i = 0; i < kwargs->alloc; i++) {
         if (mp_map_slot_is_filled(kwargs, i)) {
-            mp_map_lookup(&self->map, kwargs->table[i].key, MP_MAP_LOOKUP_ADD_IF_NOT_FOUND)->value = kwargs->table[i].value;
+            mp_map_elem_t *slot = mp_map_lookup(&self->map, kwargs->table[i].key, MP_MAP_LOOKUP_ADD_IF_NOT_FOUND);
+            mp_map_set_value(slot, kwargs->table[i].value);
         }
     }
 
@@ -667,7 +671,8 @@ mp_obj_t mp_obj_dict_store(mp_obj_t self_in, mp_obj_t key, mp_obj_t value) {
     mp_check_self(mp_obj_is_dict_or_ordereddict(self_in));
     mp_obj_dict_t *self = MP_OBJ_TO_PTR(self_in);
     mp_ensure_not_fixed(self);
-    mp_map_lookup(&self->map, key, MP_MAP_LOOKUP_ADD_IF_NOT_FOUND)->value = value;
+    mp_map_elem_t *slot = mp_map_lookup(&self->map, key, MP_MAP_LOOKUP_ADD_IF_NOT_FOUND);
+    mp_map_set_value(slot, value);
     return self_in;
 }
 

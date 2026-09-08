@@ -807,7 +807,8 @@ skip_special_accessors:
         return elem != NULL;
     } else {
         // store attribute
-        mp_map_lookup(&self->members, MP_OBJ_NEW_QSTR(attr), MP_MAP_LOOKUP_ADD_IF_NOT_FOUND)->value = value;
+        mp_map_elem_t *elem = mp_map_lookup(&self->members, MP_OBJ_NEW_QSTR(attr), MP_MAP_LOOKUP_ADD_IF_NOT_FOUND);
+        mp_map_set_value(elem, value);
         return true;
     }
 }
@@ -1149,7 +1150,7 @@ static void type_attr(mp_obj_t self_in, qstr attr, mp_obj_t *dest) {
 
                 // store attribute
                 mp_map_elem_t *elem = mp_map_lookup(locals_map, MP_OBJ_NEW_QSTR(attr), MP_MAP_LOOKUP_ADD_IF_NOT_FOUND);
-                elem->value = dest[1];
+                mp_map_set_value(elem, dest[1]);
                 dest[0] = MP_OBJ_NULL; // indicate success
             }
         }
@@ -1298,7 +1299,7 @@ static mp_obj_t mp_obj_new_type(qstr name, mp_obj_t bases_tuple, mp_obj_t locals
         // __new__ slot exists; check if it is a function
         if (mp_obj_is_fun(elem->value)) {
             // __new__ is a function, wrap it in a staticmethod decorator
-            elem->value = static_class_method_make_new(&mp_type_staticmethod, 1, 0, &elem->value);
+            mp_map_set_value(elem, static_class_method_make_new(&mp_type_staticmethod, 1, 0, &elem->value));
         }
     }
 

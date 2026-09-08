@@ -262,6 +262,7 @@ static mp_obj_t set_intersect_int(size_t n_args, const mp_obj_t *args, bool upda
             m_del(mp_obj_t, in_ptr->set.table, in_ptr->set.alloc);
             in_ptr->set.alloc = out_ptr->set.alloc;
             in_ptr->set.used = out_ptr->set.used;
+            GC_WB_PTR(out_ptr->set.table); // table buffer moved into a live set
             in_ptr->set.table = out_ptr->set.table;
         }
     }

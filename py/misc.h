@@ -98,6 +98,10 @@ typedef unsigned int uint;
 
 // TODO make a lazy m_renew that can increase by a smaller amount than requested (but by at least 1 more element)
 
+#define m_new_data(type, num) ((type *)(m_malloc_data(sizeof(type) * (num))))
+#define m_new_obj_data(type) (m_new_data(type, 1))
+void *m_malloc_data(size_t num_bytes);
+
 #define m_new(type, num) ((type *)(m_malloc(sizeof(type) * (num))))
 #define m_new_maybe(type, num) ((type *)(m_malloc_maybe(sizeof(type) * (num))))
 #define m_new0(type, num) ((type *)(m_malloc0(sizeof(type) * (num))))
@@ -108,11 +112,13 @@ typedef unsigned int uint;
 #define m_new_obj_var_maybe(obj_type, var_field, var_type, var_num) ((obj_type *)m_malloc_maybe(offsetof(obj_type, var_field) + sizeof(var_type) * (var_num)))
 #if MICROPY_MALLOC_USES_ALLOCATED_SIZE
 #define m_renew(type, ptr, old_num, new_num) ((type *)(m_realloc((ptr), sizeof(type) * (old_num), sizeof(type) * (new_num))))
+#define m_renew_data(type, ptr, old_num, new_num) ((type *)(m_realloc_data((ptr), sizeof(type) * (old_num), sizeof(type) * (new_num))))
 #define m_renew_maybe(type, ptr, old_num, new_num, allow_move) ((type *)(m_realloc_maybe((ptr), sizeof(type) * (old_num), sizeof(type) * (new_num), (allow_move))))
 #define m_del(type, ptr, num) m_free(ptr, sizeof(type) * (num))
 #define m_del_var(obj_type, var_field, var_type, var_num, ptr) (m_free(ptr, offsetof(obj_type, var_field) + sizeof(var_type) * (var_num)))
 #else
 #define m_renew(type, ptr, old_num, new_num) ((type *)(m_realloc((ptr), sizeof(type) * (new_num))))
+#define m_renew_data(type, ptr, old_num, new_num) ((type *)(m_realloc_data((ptr), sizeof(type) * (new_num))))
 #define m_renew_maybe(type, ptr, old_num, new_num, allow_move) ((type *)(m_realloc_maybe((ptr), sizeof(type) * (new_num), (allow_move))))
 #define m_del(type, ptr, num) ((void)(num), m_free(ptr))
 #define m_del_var(obj_type, var_field, var_type, var_num, ptr) ((void)(var_num), m_free(ptr))
@@ -125,10 +131,12 @@ void *m_malloc_with_finaliser(size_t num_bytes);
 void *m_malloc0(size_t num_bytes);
 #if MICROPY_MALLOC_USES_ALLOCATED_SIZE
 void *m_realloc(void *ptr, size_t old_num_bytes, size_t new_num_bytes);
+void *m_realloc_data(void *ptr, size_t old_num_bytes, size_t new_num_bytes);
 void *m_realloc_maybe(void *ptr, size_t old_num_bytes, size_t new_num_bytes, bool allow_move);
 void m_free(void *ptr, size_t num_bytes);
 #else
 void *m_realloc(void *ptr, size_t new_num_bytes);
+void *m_realloc_data(void *ptr, size_t new_num_bytes);
 void *m_realloc_maybe(void *ptr, size_t new_num_bytes, bool allow_move);
 void m_free(void *ptr);
 #endif

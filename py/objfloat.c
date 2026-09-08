@@ -183,7 +183,7 @@ MP_DEFINE_CONST_OBJ_TYPE(
 
 mp_obj_t mp_obj_new_float(mp_float_t value) {
     // Don't use mp_obj_malloc here to avoid extra function call overhead.
-    mp_obj_float_t *o = m_new_obj(mp_obj_float_t);
+    mp_obj_float_t *o = m_new_obj_data(mp_obj_float_t);
     o->base.type = &mp_type_float;
     o->value = value;
     return MP_OBJ_FROM_PTR(o);

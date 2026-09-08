@@ -43,7 +43,7 @@ static mp_obj_t micropython_ringio_make_new(const mp_obj_type_t *type, size_t n_
 
     if (!mp_get_buffer(args[0], &bufinfo, MP_BUFFER_RW)) {
         bufinfo.len = mp_obj_get_int(args[0]) + 1;
-        bufinfo.buf = m_new(uint8_t, bufinfo.len);
+        bufinfo.buf = m_new_data(uint8_t, bufinfo.len);
     }
     if (bufinfo.len < 2 || bufinfo.len > UINT16_MAX) {
         mp_raise_ValueError(NULL);

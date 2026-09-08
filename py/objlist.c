@@ -32,6 +32,14 @@
 #include "py/cstack.h"
 
 static mp_obj_t mp_obj_new_list_iterator(mp_obj_t list, size_t cur, mp_obj_iter_buf_t *iter_buf);
+
+// All stores into the items array go through this: the array is a heap buffer
+// owned by a list that may already be black.  See GC_BARRIER_TODO.md.
+static inline void list_set(mp_obj_list_t *self, size_t i, mp_obj_t v) {
+    GC_WB(v);
+    self->items[i] = v;
+}
+
 static mp_obj_list_t *list_new(size_t n);
 static mp_obj_t list_extend(mp_obj_t self_in, mp_obj_t arg_in);
 static mp_obj_t list_pop(size_t n_args, const mp_obj_t *args);
@@ -233,7 +241,7 @@ mp_obj_t mp_obj_list_append(mp_obj_t self_in, mp_obj_t arg) {
         self->alloc *= 2;
         mp_seq_clear(self->items, self->len + 1, self->alloc, sizeof(*self->items));
     }
-    self->items[self->len++] = arg;
+    list_set(self, self->len++, arg);
     return mp_const_none; // return None, as per CPython
 }
 
@@ -395,7 +403,7 @@ static mp_obj_t list_insert(mp_obj_t self_in, mp_obj_t idx, mp_obj_t obj) {
     for (mp_int_t i = self->len - 1; i > index; i--) {
         self->items[i] = self->items[i - 1];
     }
-    self->items[index] = obj;
+    list_set(self, index, obj);
 
     return mp_const_none;
 }

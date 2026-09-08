@@ -583,6 +583,7 @@ static void uart_irq_configure_timer(machine_uart_obj_t *self, mp_uint_t trigger
         self->rxidle_timer->repeat = true;
         self->rxidle_timer->handler = uart_timer_callback;
         self->rxidle_timer->handler_ctx = self;
+        GC_WB(self->rxidle_timer->handler_ctx); // heap container store, incremental GC barrier
         machine_timer_configure(self->rxidle_timer);
         self->rxidle_state = RXIDLE_STANDBY;
     }
@@ -646,6 +647,7 @@ static mp_irq_obj_t *mp_machine_uart_irq(machine_uart_obj_t *self, bool any_args
         if (handler != mp_const_none) {
             if (self->rxidle_timer == NULL) {
                 self->rxidle_timer = machine_timer_create(RXIDLE_TIMER_IDX);
+                GC_WB_PTR(self->rxidle_timer); // timer published into a live uart object
             }
             uart_irq_configure_timer(self, trigger);
         } else if (self->rxidle_timer != NULL) {

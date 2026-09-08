@@ -29,6 +29,7 @@
 #include <assert.h>
 
 #include "py/runtime.h"
+#include "py/gc.h"
 #include "py/bc.h"
 #include "py/objstr.h"
 #include "py/objgenerator.h"
@@ -185,11 +186,24 @@ mp_vm_return_kind_t mp_obj_gen_resume(mp_obj_t self_in, mp_obj_t send_value, mp_
             mp_raise_TypeError(MP_ERROR_TEXT("can't send non-None value to a just-started generator"));
         }
     } else {
+        GC_WB(send_value); // frame is heap-resident, see below
         *self->code_state.sp = send_value;
     }
 
     // Mark as running
     self->pend_exc = MP_OBJ_NULL;
+
+    // A generator's mp_code_state_t (value stack + locals) lives INSIDE this
+    // heap object, so every PUSH/SET_TOP/STORE_FAST the VM performs below is
+    // an unbarriered store into a heap object that the collector may already
+    // have scanned black.  Re-gray the generator across the execution so its
+    // frame is rescanned by the current cycle.
+    // NOTE (see ports/esp32/GC_BARRIER_TODO.md): this closes the common case --
+    // values that live across a yield -- but NOT the window where a mark cycle
+    // both starts and completes inside a single mp_execute_bytecode() call
+    // driven by the generator's own allocations.  Fully closing that needs the
+    // VM store macros barriered for heap-resident frames.
+    GC_WB_PTR(self);
 
     // Set up the correct globals context for the generator and execute it
     self->code_state.old_globals = mp_globals_get();
@@ -211,6 +225,8 @@ mp_vm_return_kind_t mp_obj_gen_resume(mp_obj_t self_in, mp_obj_t send_value, mp_
     }
 
     mp_globals_set(self->code_state.old_globals);
+
+    GC_WB_PTR(self); // frame was mutated unbarriered above; rescan it
 
     // Mark as not running
     self->pend_exc = mp_const_none;

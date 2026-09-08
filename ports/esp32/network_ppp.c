@@ -121,6 +121,7 @@ static mp_obj_t network_ppp_make_new(const mp_obj_type_t *type, size_t n_args, s
     network_ppp_obj_t *self = mp_obj_malloc_with_finaliser(network_ppp_obj_t, type);
     self->state = STATE_INACTIVE;
     self->stream = stream;
+    GC_WB(self->stream); // heap container store, incremental GC barrier
     self->pcb = NULL;
 
     return MP_OBJ_FROM_PTR(self);
@@ -207,6 +208,7 @@ static mp_obj_t network_ppp_config(size_t n_args, const mp_obj_t *args, mp_map_t
                             network_ppp_stream_uart_irq_disable(self);
                         }
                         self->stream = kwargs->table[i].value;
+                        GC_WB(self->stream); // heap container store, incremental GC barrier
                         if (self->state >= STATE_ACTIVE) {
                             network_ppp_stream_uart_irq_enable(self);
                         }

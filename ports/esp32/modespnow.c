@@ -317,8 +317,14 @@ static mp_obj_t espnow_irq(size_t n_args, const mp_obj_t *args) {
     if (recv_cb != mp_const_none && !mp_obj_is_callable(recv_cb)) {
         mp_raise_ValueError(MP_ERROR_TEXT("invalid handler"));
     }
+    // The espnow singleton is a GC-allocated (possibly already-scanned)
+    // object: these are raw connect sites for the incremental GC barrier.
+    GC_BARRIER(recv_cb);
+    GC_BARRIER(n_args > 2 ? args[2] : mp_const_none);
     self->recv_cb = recv_cb;
+    GC_WB(self->recv_cb); // heap container store, incremental GC barrier
     self->recv_cb_arg = (n_args > 2) ? args[2] : mp_const_none;
+    GC_WB(self->recv_cb_arg); // heap container store, incremental GC barrier
     return mp_const_none;
 }
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(espnow_irq_obj, 2, 3, espnow_irq);
@@ -375,6 +381,7 @@ static mp_map_elem_t *_update_rssi(const uint8_t *peer, int8_t rssi, uint32_t ti
     mp_obj_list_t *list = MP_OBJ_TO_PTR(item->value);
     list->items[0] = MP_OBJ_NEW_SMALL_INT(rssi);
     list->items[1] = mp_obj_new_int(time_ms);
+    GC_WB(list->items[1]); // heap container store, incremental GC barrier
     return item;
 }
 #endif // MICROPY_PY_ESPNOW_RSSI
@@ -479,9 +486,11 @@ static mp_obj_t espnow_recvinto(size_t n_args, const mp_obj_t *args) {
     // Update rssi value in the peer device table
     mp_map_elem_t *entry = _update_rssi(peer_buf, hdr.rssi, hdr.time_ms);
     list->items[0] = entry->key;  // Set first element of list to peer
+    GC_WB(list->items[0]); // heap container store, incremental GC barrier
     if (list->len >= 4) {
         list->items[2] = MP_OBJ_NEW_SMALL_INT(hdr.rssi);
         list->items[3] = mp_obj_new_int(hdr.time_ms);
+        GC_WB(list->items[3]); // heap container store, incremental GC barrier
     }
     #endif // MICROPY_PY_ESPNOW_RSSI
 

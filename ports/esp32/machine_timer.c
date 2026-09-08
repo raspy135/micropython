@@ -297,6 +297,7 @@ static mp_obj_t machine_timer_init_helper(machine_timer_obj_t *self, mp_uint_t n
 
     self->handler = machine_timer_handler;
     self->handler_ctx = args[ARG_callback].u_obj;
+    GC_WB(self->handler_ctx); // heap container store, incremental GC barrier
 
     machine_timer_configure(self);
     machine_timer_start(self);

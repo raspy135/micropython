@@ -265,6 +265,15 @@ typedef uint64_t mp_uint_t;
 #define MICROPY_GC_STACK_ENTRY_TYPE size_t
 #endif
 
+// Take the GC mark stack out of BSS and let the port supply the storage.  When
+// enabled the port must point MP_STATE_MEM(gc_block_stack) -- and, with a split
+// heap, gc_area_stack -- at MICROPY_ALLOC_GC_STACK_SIZE entries each before
+// calling gc_init().  This lets a port move the stack to slower external RAM;
+// the access pattern is LIFO, so the cache absorbs most of the extra latency.
+#ifndef MICROPY_GC_STACK_EXTERNAL
+#define MICROPY_GC_STACK_EXTERNAL (0)
+#endif
+
 // Be conservative and always clear to zero newly (re)allocated memory in the GC.
 // This helps eliminate stray pointers that hold on to memory that's no longer
 // used.  It decreases performance due to unnecessary memory clearing.
@@ -277,6 +286,76 @@ typedef uint64_t mp_uint_t;
 
 // Support automatic GC when reaching allocation threshold,
 // configurable by gc.threshold().
+// Enable tri-colour incremental GC (Dijkstra mark-on-store write barriers).
+// The collector then runs in bounded slices driven from gc_alloc(), so no
+// single GC pass blocks for longer than ~one slice budget (plus the sweep,
+// which remains stop-the-world).
+#ifndef MICROPY_GC_INCREMENTAL
+#define MICROPY_GC_INCREMENTAL (0)
+#endif
+
+#if MICROPY_GC_INCREMENTAL
+// Start a new collection once this many heap blocks have been allocated
+// since the previous collection finished.
+#ifndef MICROPY_GC_INCR_TRIGGER_BLOCKS
+#define MICROPY_GC_INCR_TRIGGER_BLOCKS (2 * 1024 * 1024 / MICROPY_BYTES_PER_GC_BLOCK)
+#endif
+// After each collection, the next trigger becomes FACTOR * blocks allocated
+// during the last collection window (self-tuning to the app's churn rate).
+#ifndef MICROPY_GC_INCR_TRIGGER_FACTOR
+#define MICROPY_GC_INCR_TRIGGER_FACTOR (3)
+#endif
+// Upper clamp for the adaptive trigger, as a divisor of the FREE blocks left
+// after the last sweep: a cycle must complete inside the space still
+// available, so never wait longer than free/DIVISOR of fresh allocation
+// before starting one.  Larger = cycles start earlier and allocation is less
+// likely to starve (fewer gc.stats()["oom"]), at the cost of more cycles.
+#ifndef MICROPY_GC_INCR_TRIGGER_DIVISOR
+#define MICROPY_GC_INCR_TRIGGER_DIVISOR (4)
+#endif
+// Lower clamp for the adaptive trigger.
+#ifndef MICROPY_GC_INCR_TRIGGER_MIN
+#define MICROPY_GC_INCR_TRIGGER_MIN (MICROPY_GC_INCR_TRIGGER_BLOCKS / 8)
+#endif
+// Mark work per slice, in heap words scanned (32-byte block = 8 words).
+#ifndef MICROPY_GC_INCR_SLICE_WORDS
+#define MICROPY_GC_INCR_SLICE_WORDS (512)
+#endif
+// Sweep work per slice, in allocation-table blocks visited.
+#ifndef MICROPY_GC_INCR_SWEEP_SLICE_BLOCKS
+#define MICROPY_GC_INCR_SWEEP_SLICE_BLOCKS (2048)
+#endif
+// Minimum wall-clock gap between two slices, in microseconds.  Slices are
+// triggered by allocations, but an app can allocate thousands of times per
+// frame; without this gate GC work would tax every single allocation and
+// the total duty cycle would explode.  GC duty <=~ CAP/(CAP+GAP).
+#ifndef MICROPY_GC_INCR_SLICE_GAP_US
+#define MICROPY_GC_INCR_SLICE_GAP_US (500)
+#endif
+// Hard wall-clock cap per slice in microseconds: whatever word/block budget
+// remains, a slice aborts (resumably, state is resumable) once it has run
+// this long.  This bounds the worst-case per-allocation surcharge.
+#ifndef MICROPY_GC_INCR_SLICE_CAP_US
+#define MICROPY_GC_INCR_SLICE_CAP_US (80)
+#endif
+#endif
+
+// Hook for the port to scan thread-stack roots (own C stack + spilled
+// registers + pystack + other threads' stacks).  Called by the incremental
+// collector at cycle start and again (atomically) at cycle end.
+#ifndef MICROPY_GC_PORT_STACK_ROOTS
+#define MICROPY_GC_PORT_STACK_ROOTS()
+#endif
+
+// Optional microsecond time source so the incremental stats can report
+// where stop-the-world time goes (see gc.stats()).
+#ifndef MICROPY_GC_USTIME_AVAILABLE
+#define MICROPY_GC_USTIME_AVAILABLE (0)
+#endif
+#ifndef MICROPY_GC_PORT_USTIME
+#define MICROPY_GC_PORT_USTIME() (0)
+#endif
+
 #ifndef MICROPY_GC_ALLOC_THRESHOLD
 #define MICROPY_GC_ALLOC_THRESHOLD (MICROPY_CONFIG_ROM_LEVEL_AT_LEAST_CORE_FEATURES)
 #endif

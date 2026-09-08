@@ -299,6 +299,7 @@ static mp_obj_t esp32_idf_task_info(void) {
             #endif
         };
         task_list->items[i] = mp_obj_new_tuple(7, task_data);
+        GC_WB(task_list->items[i]); // heap container store, incremental GC barrier
     }
 
     m_del(TaskStatus_t, task_array, task_count_max);

@@ -607,7 +607,8 @@ void mp_obj_exception_add_traceback(mp_obj_t self_in, qstr file, size_t line, qs
                 // There is room in the emergency buffer for traceback data
                 size_t *tb = (size_t *)((uint8_t *)MP_STATE_VM(mp_emergency_exception_buf)
                     + EMG_BUF_TRACEBACK_OFFSET);
-                self->traceback_data = tb;
+                GC_WB_PTR(tb); // traceback buffer published into a live exception
+        self->traceback_data = tb;
                 self->traceback_alloc = EMG_BUF_TRACEBACK_SIZE / sizeof(size_t);
             } else {
                 // Can't allocate and no room in emergency buffer
@@ -635,7 +636,8 @@ void mp_obj_exception_add_traceback(mp_obj_t self_in, qstr file, size_t line, qs
         if (tb_data == NULL) {
             return;
         }
-        self->traceback_data = tb_data;
+        GC_WB_PTR(tb_data); // ditto after realloc
+    self->traceback_data = tb_data;
         self->traceback_alloc += TRACEBACK_ENTRY_LEN;
     }
 

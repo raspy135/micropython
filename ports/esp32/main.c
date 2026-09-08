@@ -42,6 +42,7 @@
 #include "esp_log.h"
 #include "esp_memory_utils.h"
 #include "esp_psram.h"
+#include "esp_heap_caps.h"
 
 #include "py/cstack.h"
 #include "py/nlr.h"
@@ -135,10 +136,40 @@ void mp_task(void *pvParameter) {
         printf("mp_task_heap allocation failed!\n");
         esp_restart();
     }
+    #if MICROPY_GC_STACK_EXTERNAL
+    // GC mark stack in PSRAM rather than internal RAM.  Allocated once, out
+    // here rather than in the soft-reset loop: nothing clears mp_state_mem
+    // between resets, so re-allocating would simply leak.
+    // _prefer() so a board with no PSRAM falls back to internal RAM instead of
+    // failing here -- this is on by default for every esp32 board.
+    MICROPY_GC_STACK_ENTRY_TYPE *mp_task_gc_block_stack = heap_caps_malloc_prefer(
+        sizeof(MICROPY_GC_STACK_ENTRY_TYPE) * MICROPY_ALLOC_GC_STACK_SIZE, 2,
+        MALLOC_CAP_SPIRAM, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (mp_task_gc_block_stack == NULL) {
+        printf("mp_task gc block stack allocation failed!\n");
+        esp_restart();
+    }
+    #if MICROPY_GC_SPLIT_HEAP
+    mp_state_mem_area_t **mp_task_gc_area_stack = heap_caps_malloc_prefer(
+        sizeof(mp_state_mem_area_t *) * MICROPY_ALLOC_GC_STACK_SIZE, 2,
+        MALLOC_CAP_SPIRAM, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (mp_task_gc_area_stack == NULL) {
+        printf("mp_task gc area stack allocation failed!\n");
+        esp_restart();
+    }
+    #endif
+    #endif
 
 soft_reset:
     // initialise the stack pointer for the main thread
     mp_cstack_init_with_top((void *)sp, MICROPY_TASK_STACK_SIZE);
+    #if MICROPY_GC_STACK_EXTERNAL
+    // Must precede gc_init(), which starts using the mark stack.
+    MP_STATE_MEM(gc_block_stack) = mp_task_gc_block_stack;
+    #if MICROPY_GC_SPLIT_HEAP
+    MP_STATE_MEM(gc_area_stack) = mp_task_gc_area_stack;
+    #endif
+    #endif
     gc_init(mp_task_heap, mp_task_heap + MICROPY_GC_INITIAL_HEAP_SIZE);
     mp_init();
     mp_obj_list_append(mp_sys_path, MP_OBJ_NEW_QSTR(MP_QSTR__slash_lib));

@@ -57,6 +57,7 @@ static inline void mp_obj_list_set_len(mp_obj_t self_in, size_t len) {
 static inline void mp_obj_list_store(mp_obj_t self_in, mp_obj_t index, mp_obj_t value) {
     mp_obj_list_t *self = (mp_obj_list_t *)MP_OBJ_TO_PTR(self_in);
     size_t i = mp_get_index(self->base.type, self->len, index, false);
+    GC_WB(value); // items array is a heap buffer owned by a possibly-black list
     self->items[i] = value;
 }
 

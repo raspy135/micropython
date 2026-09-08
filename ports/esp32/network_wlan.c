@@ -436,6 +436,7 @@ static mp_obj_t network_wlan_status(size_t n_args, const mp_obj_t *args) {
                 mp_obj_tuple_t *t = mp_obj_new_tuple(2, NULL);
                 #endif
                 t->items[0] = mp_obj_new_bytes(source[i].mac, sizeof(source[i].mac));
+                GC_WB(t->items[0]); // heap container store, incremental GC barrier
                 #if !CONFIG_ESP_HOSTED_ENABLED
                 t->items[1] = source[i].ip.addr != 0 ? netutils_format_ipv4_addr((uint8_t *)(&source[i].ip), NETUTILS_BIG) : mp_const_none;
                 #endif
@@ -489,7 +490,9 @@ static mp_obj_t network_wlan_scan(mp_obj_t self_in) {
             uint8_t *x = memchr(wifi_ap_records[i].ssid, 0, sizeof(wifi_ap_records[i].ssid));
             int ssid_len = x ? x - wifi_ap_records[i].ssid : sizeof(wifi_ap_records[i].ssid);
             t->items[0] = mp_obj_new_bytes(wifi_ap_records[i].ssid, ssid_len);
+            GC_WB(t->items[0]); // heap container store, incremental GC barrier
             t->items[1] = mp_obj_new_bytes(wifi_ap_records[i].bssid, sizeof(wifi_ap_records[i].bssid));
+            GC_WB(t->items[1]); // heap container store, incremental GC barrier
             t->items[2] = MP_OBJ_NEW_SMALL_INT(wifi_ap_records[i].primary);
             t->items[3] = MP_OBJ_NEW_SMALL_INT(wifi_ap_records[i].rssi);
             t->items[4] = MP_OBJ_NEW_SMALL_INT(wifi_ap_records[i].authmode);

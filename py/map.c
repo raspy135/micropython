@@ -93,6 +93,10 @@ void mp_map_init(mp_map_t *map, size_t n) {
     } else {
         map->alloc = n;
         map->table = m_new0(mp_map_elem_t, map->alloc);
+        // The m_new0 above can itself drive a mark slice that blackens the
+        // owner before this store lands, so "freshly allocated owner" is NOT
+        // a safe exemption whenever an allocation sits between the two.
+        GC_WB_PTR(map->table);
     }
     map->used = 0;
     map->all_keys_are_qstrs = 1;
@@ -134,6 +138,12 @@ static void mp_map_rehash(mp_map_t *map) {
     DEBUG_printf("mp_map_rehash(%p): " UINT_FMT " -> " UINT_FMT "\n", map, old_alloc, new_alloc);
     mp_map_elem_t *old_table = map->table;
     mp_map_elem_t *new_table = m_new0(mp_map_elem_t, new_alloc);
+    #if MICROPY_GC_INCREMENTAL
+    // The new table holds pointer slots (keys/values); it is published into
+    // the map struct by a raw store below, so it must be live if a mark
+    // cycle is currently running.
+    GC_GRAY_MARK_PTR(new_table);
+    #endif
     // If we reach this point, table resizing succeeded, now we can edit the old map.
     map->alloc = new_alloc;
     map->used = 0;
@@ -141,7 +151,7 @@ static void mp_map_rehash(mp_map_t *map) {
     map->table = new_table;
     for (size_t i = 0; i < old_alloc; i++) {
         if (old_table[i].key != MP_OBJ_NULL && old_table[i].key != MP_OBJ_SENTINEL) {
-            mp_map_lookup(map, old_table[i].key, MP_MAP_LOOKUP_ADD_IF_NOT_FOUND)->value = old_table[i].value;
+            mp_map_set_value(mp_map_lookup(map, old_table[i].key, MP_MAP_LOOKUP_ADD_IF_NOT_FOUND), old_table[i].value);
         }
     }
     m_del(mp_map_elem_t, old_table, old_alloc);
@@ -153,6 +163,14 @@ static void mp_map_rehash(mp_map_t *map) {
 //  - returns slot, with key non-null and value=MP_OBJ_NULL if it was added
 // MP_MAP_LOOKUP_REMOVE_IF_FOUND behaviour:
 //  - returns NULL if not found, else the slot if was found in with key null and value non-null
+// Barriered value store for a slot returned by mp_map_lookup().  The slot
+// lives in a heap table owned by a dict/module/class that may already be
+// black, so every caller that assigns elem->value must use this.
+void mp_map_set_value(mp_map_elem_t *elem, mp_obj_t value) {
+    GC_WB(value);
+    elem->value = value;
+}
+
 mp_map_elem_t *MICROPY_WRAP_MP_MAP_LOOKUP(mp_map_lookup)(mp_map_t * map, mp_obj_t index, mp_map_lookup_kind_t lookup_kind) {
     // If the map is a fixed array then we must only be called for a lookup
     assert(!map->is_fixed || lookup_kind == MP_MAP_LOOKUP);
@@ -202,7 +220,7 @@ mp_map_elem_t *MICROPY_WRAP_MP_MAP_LOOKUP(mp_map_lookup)(mp_map_t * map, mp_obj_
                     // note: caller must NULL the value so the GC can clean up (e.g. see dict_get_helper).
                     elem = &map->table[map->used];
                     elem->key = MP_OBJ_NULL;
-                    elem->value = value;
+                    mp_map_set_value(elem, value);
                 }
                 #endif
                 MAP_CACHE_SET(index, elem - map->table);
@@ -220,6 +238,7 @@ mp_map_elem_t *MICROPY_WRAP_MP_MAP_LOOKUP(mp_map_lookup)(mp_map_t * map, mp_obj_
             mp_seq_clear(map->table, map->used, map->alloc, sizeof(*map->table));
         }
         mp_map_elem_t *elem = map->table + map->used++;
+        GC_BARRIER(index); // map slot is a heap container (keys are references too)
         elem->key = index;
         elem->value = MP_OBJ_NULL;
         if (!mp_obj_is_qstr(index)) {
@@ -261,6 +280,7 @@ mp_map_elem_t *MICROPY_WRAP_MP_MAP_LOOKUP(mp_map_lookup)(mp_map_t * map, mp_obj_
                 if (avail_slot == NULL) {
                     avail_slot = slot;
                 }
+                GC_BARRIER(index); // map slot is a heap container (keys are references too)
                 avail_slot->key = index;
                 avail_slot->value = MP_OBJ_NULL;
                 if (!mp_obj_is_qstr(index)) {
@@ -302,6 +322,7 @@ mp_map_elem_t *MICROPY_WRAP_MP_MAP_LOOKUP(mp_map_lookup)(mp_map_t * map, mp_obj_
                 if (avail_slot != NULL) {
                     // there was an available slot, so use that
                     map->used++;
+                    GC_BARRIER(index); // map slot is a heap container (keys are references too)
                     avail_slot->key = index;
                     avail_slot->value = MP_OBJ_NULL;
                     if (!mp_obj_is_qstr(index)) {
@@ -330,6 +351,9 @@ void mp_set_init(mp_set_t *set, size_t n) {
     set->alloc = n;
     set->used = 0;
     set->table = m_new0(mp_obj_t, set->alloc);
+    // The new table is a heap buffer of pointer slots published into a set
+    // that may already be black; it must be live for the current cycle.
+    GC_WB_PTR(set->table);
 }
 
 static void mp_set_rehash(mp_set_t *set) {
@@ -338,6 +362,7 @@ static void mp_set_rehash(mp_set_t *set) {
     set->alloc = get_hash_alloc_greater_or_equal_to(set->alloc + 1);
     set->used = 0;
     set->table = m_new0(mp_obj_t, set->alloc);
+    GC_WB_PTR(set->table); // new table published into a possibly-black set
     for (size_t i = 0; i < old_alloc; i++) {
         if (old_table[i] != MP_OBJ_NULL && old_table[i] != MP_OBJ_SENTINEL) {
             mp_set_lookup(set, old_table[i], MP_MAP_LOOKUP_ADD_IF_NOT_FOUND);
@@ -370,6 +395,7 @@ mp_obj_t mp_set_lookup(mp_set_t *set, mp_obj_t index, mp_map_lookup_kind_t looku
                     avail_slot = &set->table[pos];
                 }
                 set->used++;
+                GC_WB(index); // set table is a heap container
                 *avail_slot = index;
                 return index;
             } else {
@@ -404,6 +430,7 @@ mp_obj_t mp_set_lookup(mp_set_t *set, mp_obj_t index, mp_map_lookup_kind_t looku
                 if (avail_slot != NULL) {
                     // there was an available slot, so use that
                     set->used++;
+                    GC_WB(index); // set table is a heap container
                     *avail_slot = index;
                     return index;
                 } else {

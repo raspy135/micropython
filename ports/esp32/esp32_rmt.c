@@ -402,6 +402,7 @@ static mp_obj_t esp32_rmt_write_pulses(size_t n_args, const mp_obj_t *args) {
 
     if (num_items > self->cap_items) {
         self->items = (rmt_symbol_word_t *)m_realloc(self->items, num_items * sizeof(rmt_symbol_word_t *));
+        GC_WB_PTR(self->items); // buffer republished into a live object
         self->cap_items = num_items;
     }
 

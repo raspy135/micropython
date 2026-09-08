@@ -107,7 +107,17 @@ static mp_obj_array_t *array_new(char typecode, size_t n) {
     o->typecode = typecode;
     o->free = 0;
     o->len = n;
-    o->items = m_new(byte, typecode_size * o->len);
+    //o->items = m_new(byte, typecode_size * o->len);
+
+    o->items = m_new_data(byte, typecode_size * o->len);
+    /*
+    if(o->base.type ==  &mp_type_bytearray){
+      o->items = m_new_data(byte, typecode_size * o->len);
+    }else{
+      //printf("normal\n");
+      o->items = m_new(byte, typecode_size * o->len);
+    }
+    */
     return o;
 }
 #endif
@@ -239,6 +249,7 @@ static mp_obj_t memoryview_make_new(const mp_obj_type_t *type_in, size_t n_args,
     if (mp_obj_get_type(args[0]) == &mp_type_memoryview) {
         mp_obj_array_t *other = MP_OBJ_TO_PTR(args[0]);
         self->memview_offset = other->memview_offset;
+        GC_WB_PTR(other->items); // buffer shared into a live array
         self->items = other->items;
     }
 
@@ -398,7 +409,7 @@ static mp_obj_t array_append(mp_obj_t self_in, mp_obj_t arg) {
         size_t item_sz = mp_binary_get_size('@', self->typecode, NULL);
         // TODO: alloc policy
         size_t add_cnt = 8;
-        self->items = m_renew(byte, self->items, item_sz * self->len, item_sz * (self->len + add_cnt));
+        self->items = m_renew_data(byte, self->items, item_sz * self->len, item_sz * (self->len + add_cnt));
         self->free = add_cnt;
         mp_seq_clear(self->items, self->len + 1, self->len + self->free, item_sz);
     }
@@ -431,7 +442,7 @@ static mp_obj_t array_extend(mp_obj_t self_in, mp_obj_t arg_in) {
     // make sure we have enough room to extend
     // TODO: alloc policy; at the moment we go conservative
     if (self->free < len) {
-        self->items = m_renew(byte, self->items, (self->len + self->free) * sz, (self->len + len) * sz);
+      self->items = m_renew_data(byte, self->items, (self->len + self->free) * sz, (self->len + len) * sz);
         self->free = 0;
 
         if (self_in == arg_in) {
@@ -519,7 +530,7 @@ static mp_obj_t array_subscr(mp_obj_t self_in, mp_obj_t index_in, mp_obj_t value
                 if (len_adj > 0) {
                     if ((size_t)len_adj > o->free) {
                         // TODO: alloc policy; at the moment we go conservative
-                        o->items = m_renew(byte, o->items, (o->len + o->free) * item_sz, (o->len + len_adj) * item_sz);
+                      o->items = m_renew_data(byte, o->items, (o->len + o->free) * item_sz, (o->len + len_adj) * item_sz);
                         o->free = len_adj;
                         // m_renew may have moved o->items
                         if (src_items == dest_items) {
@@ -690,6 +701,7 @@ mp_obj_t mp_obj_new_bytearray_by_ref(size_t n, void *items) {
     o->typecode = BYTEARRAY_TYPECODE;
     o->free = 0;
     o->len = n;
+    GC_WB_PTR(items); // buffer published into a live array
     o->items = items;
     return MP_OBJ_FROM_PTR(o);
 }

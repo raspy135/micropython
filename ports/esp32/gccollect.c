@@ -35,6 +35,10 @@
 #include "py/mpthread.h"
 #include "gccollect.h"
 
+#if MICROPY_ENABLE_PYSTACK
+#include "py/pystack.h"
+#endif
+
 #if CONFIG_IDF_TARGET_ARCH_XTENSA
 
 #include "xtensa/hal.h"
@@ -53,24 +57,71 @@ static void gc_collect_inner(volatile unsigned int level) {
 }
 
 void gc_collect(void) {
+    #if MICROPY_GC_INCREMENTAL
+    // In incremental mode route through the incremental machinery so the
+    // gray set stays consistent (a stale partial cycle would be unsafe).
+    if (gc_incremental_active()) {
+        gc_incremental_complete();
+        return;
+    }
+    if (gc_incremental_enabled()) {
+        gc_incremental_start();
+        gc_incremental_complete();
+        return;
+    }
+    #endif
     gc_collect_start();
+    mp_port_gc_stack_roots();
+    gc_collect_end();
+}
+
+// Scan all stack-related roots: own C stack + spilled registers (via the
+// window-deepening recursion), own pystack, and other threads' stacks.
+// Called by classic gc_collect() above and by py/gc.c at incremental cycle
+// start and end (MICROPY_GC_PORT_STACK_ROOTS).
+void mp_port_gc_stack_roots(void) {
     gc_collect_inner(0);
+    #if MICROPY_ENABLE_PYSTACK
+    // The pystack is a separate malloc'd buffer not covered by the C stack scan.
+    // Scan it so that Python locals stored there are not incorrectly freed.
+    gc_collect_root((void **)MP_STATE_THREAD(pystack_start),
+        (MP_STATE_THREAD(pystack_cur) - MP_STATE_THREAD(pystack_start)) / sizeof(mp_uint_t));
+    #endif
     #if MICROPY_PY_THREAD
     mp_thread_gc_others();
     #endif
-    gc_collect_end();
 }
 
 #elif CONFIG_IDF_TARGET_ARCH_RISCV
 #include "shared/runtime/gchelper.h"
 
 void gc_collect(void) {
+    #if MICROPY_GC_INCREMENTAL
+    if (gc_incremental_active()) {
+        gc_incremental_complete();
+        return;
+    }
+    if (gc_incremental_enabled()) {
+        gc_incremental_start();
+        gc_incremental_complete();
+        return;
+    }
+    #endif
     gc_collect_start();
+    mp_port_gc_stack_roots();
+    gc_collect_end();
+}
+
+// See comment on the xtensa variant above.
+void mp_port_gc_stack_roots(void) {
     gc_helper_collect_regs_and_stack();
+    #if MICROPY_ENABLE_PYSTACK
+    gc_collect_root((void **)MP_STATE_THREAD(pystack_start),
+        (MP_STATE_THREAD(pystack_cur) - MP_STATE_THREAD(pystack_start)) / sizeof(mp_uint_t));
+    #endif
     #if MICROPY_PY_THREAD
     mp_thread_gc_others();
     #endif
-    gc_collect_end();
 }
 
 #else

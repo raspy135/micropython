@@ -383,7 +383,9 @@ static mp_obj_t socket_accept(const mp_obj_t arg0) {
     mp_uint_t port = lwip_ntohs(((struct sockaddr_in *)&addr)->sin_port);
     mp_obj_tuple_t *client = mp_obj_new_tuple(2, NULL);
     client->items[0] = sock;
+    GC_WB(client->items[0]); // heap container store, incremental GC barrier
     client->items[1] = netutils_format_inet_addr(ip, port, NETUTILS_BIG);
+    GC_WB(client->items[1]); // heap container store, incremental GC barrier
 
     return client;
 }
@@ -529,7 +531,9 @@ static mp_obj_t socket_setsockopt(size_t n_args, const mp_obj_t *args) {
                 if (self->events_callback == MP_OBJ_NULL) {
                     socket_events_add(self);
                 }
+                GC_BARRIER(args[3]); // socket obj is GC-allocated: raw connect site
                 self->events_callback = args[3];
+                GC_WB(self->events_callback); // heap container store, incremental GC barrier
             }
             break;
         }
